@@ -1,0 +1,194 @@
+## 1. Project Architecture
+
+The implementation is a C++17 static library with a thin public facade and two internal subsystems:
+
+```text
+TXT / ASCII VTK map
+        |
+        v
+VoxelIO -> VoxelGrid/raw occupancy
+        |
+        v
+PoseGenerator -> pose table q=(T,N)
+        |
+        v
+PoseMaskPopulation -> lazy per-voxel allowed-pose masks
+        |
+        v
+CoarseAStar -> straight/bend/twist swept-volume search
+        |
+        v
+VoxelPlannerAPI -> restored centerlines and conditional poses
+```
+
+- Public API: [VoxelPlannerAPI.h](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/include/VoxelPlannerAPI.h:15) exposes `loadMap()`, `findPaths()`, `ProcessedMap`, `VoxelClass`, and path result types.
+- Facade: [VoxelPlannerAPI.cpp](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/src/VoxelPlannerAPI.cpp:353) owns endpoint processing, preprocessing orchestration, exception translation, and public result conversion.
+- Shared internal model: [Types.h](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/Module1_Main/Types.h:83) defines planner configuration, poses, offsets, the voxel grid, masks, and internal results.
+- Morphology/geometry: `Module2_Morphology` plus `src/PoseGenerator.cpp`, `PoseMaskPopulation.cpp`, and `SweptVolume.cpp`.
+- Search: [CoarseAStar.h](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/Module3_AStar/CoarseAStar.h:33) is a largely header-implemented state-lattice planner; transition validation has a separate implementation unit.
+- CLI: [main.cpp](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/Module1_Main/main.cpp:11) is an interactive wrapper around the public API.
+- `ProcessedMap` uses a shared PImpl containing `VoxelGrid`, pose table, and `PlannerConfig`, allowing repeated route requests against one loaded map.
+
+A subtle architectural point is that preprocessing does not eagerly classify every voxel. It precomputes one footprint per pose and installs it into `VoxelGrid`; individual voxel masks are evaluated lazily when queried.
+
+## 2. Core Class and Data Mapping
+
+### Pose representation
+
+`BusbarPose` in [Types.h](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/Module1_Main/Types.h:102) stores:
+
+- Integer tangent `(tx,ty,tz)` from the 26 nonzero `{-1,0,1}³` directions.
+- Floating-point normal `(nx,ny,nz)`.
+- Contiguous `poseId`.
+- Roll angle in degrees.
+
+`B = normalize(T x N)` is computed when footprints or sweeps are generated rather than stored.
+
+`generateDiscretePoses()` in [PoseGenerator.cpp](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/src/PoseGenerator.cpp:96) chooses a stable reference axis, constructs an orthogonal base normal, and rolls it around `T`. At the default 15-degree interval this produces `26 * 24 = 624` poses.
+
+### Allowed-pose masks and voxel classes
+
+`VoxelGrid` in [Types.h](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/Module1_Main/Types.h:138) contains:
+
+- Dense raw occupancy in X-fastest order: `x + y*width + z*width*height`.
+- `poseCount_` and packed 64-bit mask words.
+- `all_poses_allowed_` for the common fully-open case.
+- `poseMaskSlots_` plus `allowedPoseMask_` for sparse conditional masks.
+- Cached footprint bounds and an 8×8×8 occupancy-block index.
+
+With 624 poses, each complete mask has ten 64-bit words. `getState()` maps the mask result to:
+
+- `BLOCKED`: raw obstacle or zero valid poses.
+- `UNCONDITIONAL`: every pose is valid.
+- `POSE_CONDITIONAL`: a nonempty strict subset is valid.
+
+This follows the requested pose-aware classification: an open voxel is not blocked merely because one orientation collides.
+
+### Search state and actions
+
+The lattice key is exactly:
+
+```text
+stateKey = voxelIndex * poseCount + poseId
+```
+
+`StateRecord` stores `g`, parent state, parent action, and open/closed state. The action catalog contains:
+
+- One straight action for every pose.
+- Bend actions connecting source and approximately matched target poses.
+- Two in-place roll/twist actions per pose.
+
+The twist action is an implementation extension beyond the stated straight/bend design.
+
+## 3. Algorithm Details
+
+### Static pose collision checking
+
+There is no `local_voxel_ijk.txt` in this release, and no code attempts to read one. Obstacle data comes entirely from the main map. Local offset sets are generated procedurally by `generatePoseFootprint()` in [PoseGenerator.cpp](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/src/PoseGenerator.cpp:152).
+
+For each pose:
+
+1. Normalize `T` and `N`, verify `T·N ≈ 0`, and derive `B`.
+2. Use `ceil(W-ε)` width samples and `ceil(H-ε)` thickness samples.
+3. Center samples in the `(B,N)` plane.
+4. Transform them into XYZ, round to integer voxels, and deduplicate them.
+
+This is a sampled cross-section rasterization, not an exact oriented-box/voxel intersection test. Width and thickness are implicitly measured in voxel units; no voxel-resolution parameter exists.
+
+`ensurePoseMaskEvaluated()` tests every generated offset against boundaries and raw occupancy. Out-of-bounds footprint samples count as collisions. Footprint bounding boxes and occupancy blocks provide a fast all-clear path before exact offset enumeration.
+
+### Straight sweeps
+
+`generateStraightSweep()` in [SweptVolume.cpp](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/src/SweptVolume.cpp:159) translates the constant `(T,N)` cross-section along the segment. Sampling is bounded by 0.49 voxel:
+
+```text
+samples = ceil(distance / 0.49)
+```
+
+The A* straight step is `(tx,ty,tz)`, so its physical cost and sweep distance are `1`, `sqrt(2)`, or `sqrt(3)` for face, edge, or corner adjacency.
+
+### Bend and twist sweeps
+
+Bend construction in [CoarseAStar.h](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/Module3_AStar/CoarseAStar.h:1029) projects each global axis onto the plane orthogonal to the source tangent, tries both signs, and evaluates configured angles through 90 degrees.
+
+The radius is selected by axis alignment:
+
+```text
+flat:     flat_bend_factor * thickness
+vertical: vertical_bend_factor * width
+```
+
+The arc endpoint is rounded to a lattice displacement, and zero-displacement actions are discarded. Bend cost is `radius * angle`.
+
+`generateExplicitBendSweep()` parallel-transports the frame with Rodrigues rotation and samples according to `(radius + cross-section radius) * angle / 0.49`. Bend sweeps are generated lazily and cached.
+
+Twists preserve position and tangent while rotating `N`. Their swept volume is checked, but their search cost is currently zero.
+
+`PoseTransitionValidator` in [PoseTransitionValidation.cpp](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/src/PoseTransitionValidation.cpp:83) rejects empty sweeps, out-of-map offsets, raw obstacles, and internal keep-out values.
+
+### A* and multiple paths
+
+`runSingleSearch()` uses a sparse `unordered_map` of `(voxel,poseId)` records and a priority queue. It is weighted A*, not strictly optimal A*:
+
+```text
+f = g + 10 * h
+```
+
+The heuristic combines:
+
+- Reverse 6-connected BFS distance to the goal.
+- Euclidean fallback for BFS-unreachable cells.
+- Goal-tangent alignment.
+- Alignment with a locally descending BFS direction.
+
+Equivalent poses with the same tangent and parallel or antiparallel normals share a dominance class, reducing redundant expansion. Candidate swept-volume checks are parallelized with OpenMP when the action count is sufficiently large.
+
+Multiple routes are produced by repeated searches. Accepted or over-overlapping centerlines receive `+100000` penalties, with `+1000` on their 3×3×3 neighborhood. Candidate overlap is the fraction of unique candidate voxels already present in accepted paths. Results above the default `0.30` threshold are rejected, with ten retries per requested path and at most ten returned paths.
+
+`path_blocking_radius` is validated but is not actually used to determine the penalty neighborhood; the code always uses 3×3×3 neighbors. Endpoint penalty immunity is fixed at 15 voxels by the public facade.
+
+### Important conformance gaps
+
+- The search state is pose-aware, but goal acceptance checks `current.voxelIndex == goalVoxel`, not `current.stateKey == goalKey`. Consequently the requested goal `poseId` is encouraged by the heuristic but not enforced.
+- A fallback state within two voxels of the goal may have the goal appended without a final swept-volume validation.
+- Endpoint immunity skips target pose and sweep collision checks for transitions touching the 15-voxel endpoint regions. Therefore the implementation does not literally guarantee collision validation for every edge.
+- Bend target poses are nearest discrete matches; the planner’s explicit bend sweep does not verify exact alignment with that selected target pose.
+- Public results expose poses only for `POSE_CONDITIONAL` waypoints. They do not provide a pose for every point or expose straight/bend/twist action labels, even though parent actions exist internally.
+- Lazy mask mutation is not synchronized, so concurrent `findPaths()` calls sharing one `ProcessedMap` should not be assumed thread-safe.
+
+## 4. Input, Output, and File Handling
+
+The text parser is [VoxelIO.h](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/Module2_Morphology/VoxelIO.h:260). It accepts:
+
+```text
+header xsize ysize zsize
+x y z [flag]
+...
+```
+
+The first header token is descriptive and ignored; `map:` also works. UTF-8 BOMs are removed. Dimensions must be positive.
+
+Every valid listed coordinate is treated as occupied whether the flag is omitted, `0`, or `1`. Invalid flags, malformed lines, and out-of-range coordinates are silently skipped. This behavior is explicitly verified by `verify_missing_flag.cpp`.
+
+`.vtk` files are parsed as ASCII `STRUCTURED_POINTS`, `ImageData`, or `IMAGE_DATA`. Scalars are read in dense X-fastest order; zero is free and any nonzero value is occupied.
+
+`VoxelIO::exportDilatedMapToVtk()` exports an ASCII structured volume, but it is internal and not exposed through `VoxelPlannerAPI.h`. Since pose-derived blocked classifications remain in lazy masks rather than being written into dense storage, this export primarily reflects raw obstacles, not the complete pose-derived `BLOCKED` classification.
+
+The public output is `pair<PlanStatus, vector<PathResult>>`. Each path contains a 26-connected voxel centerline, float cost, and sparse conditional `PoseDescription` records. Paths are sorted by cost. The facade fixes both terminal tangents to `+X`, resolves collision-free shifted endpoints where possible, then restores the requested raw start and goal in the returned centerline.
+
+## 5. Build, Run, and Test
+
+[CMakeLists.txt](F:/c++/.vscode/find_every_1/Voxel_Planner_Release/CMakeLists.txt:1) uses CMake 3.16+, C++17, and required OpenMP. It builds:
+
+- `voxel_planner`: static library written to `lib/`.
+- `simulate_caller`: executable written to `bin/`.
+
+```powershell
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+.\bin\simulate_caller.exe path\to\map.txt
+```
+
+The CLI prompts for width/thickness, start, goal, and maximum path count.
+
+The current build completes successfully. CMake does not register the source files in `tests/`; `ctest --test-dir build -N` reports zero tests. I manually compiled all nine standalone test mains against `lib/libvoxel_planner.a`; all passed, covering pose generation, footprint dimensions, 624-pose masks, straight/bend/twist sweeps, SE(3) A*, diversity, parser flags, edge cases, and the public API integration fixture.
