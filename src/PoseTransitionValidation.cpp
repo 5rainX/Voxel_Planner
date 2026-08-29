@@ -1,5 +1,8 @@
 #include "Module3_AStar/PoseTransitionValidation.h"
 
+#include "Module2_Morphology/VoxelMorphologyEngine.h"
+
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -90,6 +93,32 @@ ValidationResult PoseTransitionValidator::validateSweep(
             "Transition sweep must contain at least one voxel offset.");
     }
 
+    voxel_planner::VoxelOffsetBounds bounds;
+    bounds.minDx = bounds.maxDx = sweepOffsets.front().dx;
+    bounds.minDy = bounds.maxDy = sweepOffsets.front().dy;
+    bounds.minDz = bounds.maxDz = sweepOffsets.front().dz;
+    for (const voxel_planner::VoxelOffset& offset : sweepOffsets) {
+        bounds.minDx = std::min(bounds.minDx, offset.dx);
+        bounds.maxDx = std::max(bounds.maxDx, offset.dx);
+        bounds.minDy = std::min(bounds.minDy, offset.dy);
+        bounds.maxDy = std::max(bounds.maxDy, offset.dy);
+        bounds.minDz = std::min(bounds.minDz, offset.dz);
+        bounds.maxDz = std::max(bounds.maxDz, offset.dz);
+    }
+    bounds.valid = true;
+    if (map.morphologyPrefix_ &&
+        module2_morphology::VoxelMorphologyEngine::isBoxCollisionFree(
+            *map.morphologyPrefix_,
+            map.prefixWidth_,
+            map.prefixHeight_,
+            map.prefixDepth_,
+            anchor.x,
+            anchor.y,
+            anchor.z,
+            bounds)) {
+        return {};
+    }
+
     for (const voxel_planner::VoxelOffset& offset : sweepOffsets) {
         const std::int64_t x =
             static_cast<std::int64_t>(anchor.x) + offset.dx;
@@ -115,7 +144,7 @@ ValidationResult PoseTransitionValidator::validateSweep(
             return failure(
                 ErrorCode::TRANSITION_COLLISION,
                 "Transition swept volume intersects an obstacle or "
-                "path keep-out zone.");
+            "path keep-out zone.");
         }
     }
     return {};

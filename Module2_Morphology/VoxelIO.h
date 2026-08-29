@@ -404,22 +404,15 @@ private:
             int x = 0;
             int y = 0;
             int z = 0;
-            int flag = 0;
             if (!(record >> x >> y >> z)) {
                 continue;
             }
-            if (!(record >> flag)) {
-                if (!record.eof()) {
-                    continue;
-                }
-                flag = 0;
-            }
-            if ((flag != 0 && flag != 1) || !grid.isValid(x, y, z)) {
+            if (!grid.isValid(x, y, z)) {
                 continue;
             }
 
-            // A listed coordinate is occupied regardless of whether the
-            // optional source flag was omitted or explicitly 0/1.
+            // Sparse text records are occupancy declarations. Any trailing
+            // value is metadata and must not affect occupancy.
             grid.storage_[grid.index(
                 static_cast<std::uint32_t>(x),
                 static_cast<std::uint32_t>(y),

@@ -9,10 +9,12 @@
 #include <memory>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace module2_morphology {
 class VoxelIO;
+class VoxelMorphologyEngine;
 class PoseMaskPopulator;
 }
 namespace module3_astar {
@@ -254,6 +256,47 @@ struct VoxelGrid {
             static_cast<std::int64_t>(anchorZ) + bounds.minDz;
         const std::int64_t maxZ =
             static_cast<std::int64_t>(anchorZ) + bounds.maxDz;
+        if (morphologyPrefix_ && prefixWidth_ > 0U &&
+            prefixHeight_ > 0U && prefixDepth_ > 0U) {
+            const std::int64_t mapWidth =
+                static_cast<std::int64_t>(prefixWidth_) - 1;
+            const std::int64_t mapHeight =
+                static_cast<std::int64_t>(prefixHeight_) - 1;
+            const std::int64_t mapDepth =
+                static_cast<std::int64_t>(prefixDepth_) - 1;
+            if (minX < 0 || minY < 0 || minZ < 0 ||
+                maxX >= mapWidth || maxY >= mapHeight ||
+                maxZ >= mapDepth ||
+                minX > maxX || minY > maxY || minZ > maxZ) {
+                return false;
+            }
+            const auto at = [
+                this](std::uint32_t x,
+                      std::uint32_t y,
+                      std::uint32_t z) noexcept -> std::uint64_t {
+                return (*morphologyPrefix_)[
+                    static_cast<std::size_t>(x) +
+                    static_cast<std::size_t>(y) * prefixWidth_ +
+                    static_cast<std::size_t>(z) * prefixWidth_ *
+                        prefixHeight_];
+            };
+            const std::uint32_t x1 = static_cast<std::uint32_t>(minX);
+            const std::uint32_t x2 = static_cast<std::uint32_t>(maxX + 1);
+            const std::uint32_t y1 = static_cast<std::uint32_t>(minY);
+            const std::uint32_t y2 = static_cast<std::uint32_t>(maxY + 1);
+            const std::uint32_t z1 = static_cast<std::uint32_t>(minZ);
+            const std::uint32_t z2 = static_cast<std::uint32_t>(maxZ + 1);
+            const std::uint64_t sum =
+                at(x2, y2, z2) -
+                at(x1, y2, z2) -
+                at(x2, y1, z2) -
+                at(x2, y2, z1) +
+                at(x1, y1, z2) +
+                at(x1, y2, z1) +
+                at(x2, y1, z1) -
+                at(x1, y1, z1);
+            return sum == 0U;
+        }
         if (minX < 0 || minY < 0 || minZ < 0 ||
             maxX >= width_ || maxY >= height_ || maxZ >= depth_) {
             return false;
@@ -370,8 +413,83 @@ struct VoxelGrid {
                 static_cast<std::uint32_t>(y) / kOccupancyBlockSize,
                 static_cast<std::uint32_t>(z) / kOccupancyBlockSize);
         }
+        morphologyPrefix_.reset();
+        prefixWidth_ = 0U;
+        prefixHeight_ = 0U;
+        prefixDepth_ = 0U;
         mask_evaluated_[linearIndex] = false;
         all_poses_allowed_[linearIndex] = false;
+    }
+
+    void attachMorphologyPrefix(
+        std::shared_ptr<const std::vector<std::uint64_t>> prefix,
+        std::uint32_t prefixWidth,
+        std::uint32_t prefixHeight,
+        std::uint32_t prefixDepth) {
+        if (!prefix) {
+            morphologyPrefix_.reset();
+            prefixWidth_ = 0U;
+            prefixHeight_ = 0U;
+            prefixDepth_ = 0U;
+            return;
+        }
+        if (prefixWidth != width_ + 1U ||
+            prefixHeight != height_ + 1U ||
+            prefixDepth != depth_ + 1U ||
+            prefix->size() != static_cast<std::size_t>(prefixWidth) *
+                                 prefixHeight * prefixDepth) {
+            throw std::invalid_argument(
+                "Morphology prefix dimensions do not match its storage.");
+        }
+        morphologyPrefix_ = std::move(prefix);
+        prefixWidth_ = prefixWidth;
+        prefixHeight_ = prefixHeight;
+        prefixDepth_ = prefixDepth;
+    }
+
+    void replaceRawStorage(
+        std::uint32_t w,
+        std::uint32_t h,
+        std::uint32_t d,
+        std::vector<std::uint8_t> storage) {
+        if (poseCount_ != 0U) {
+            throw std::logic_error(
+                "Raw storage cannot be replaced after pose-mask initialization.");
+        }
+        if (storage.size() != static_cast<std::size_t>(w) * h * d) {
+            throw std::invalid_argument("Raw voxel storage size mismatch.");
+        }
+
+        width_ = w;
+        height_ = h;
+        depth_ = d;
+        storage_ = std::move(storage);
+
+        occupancyBlockWidth_ =
+            (w + kOccupancyBlockSize - 1U) / kOccupancyBlockSize;
+        occupancyBlockHeight_ =
+            (h + kOccupancyBlockSize - 1U) / kOccupancyBlockSize;
+        occupancyBlockDepth_ =
+            (d + kOccupancyBlockSize - 1U) / kOccupancyBlockSize;
+        occupancyBlocks_.assign(
+            static_cast<std::size_t>(occupancyBlockWidth_) *
+                occupancyBlockHeight_ * occupancyBlockDepth_,
+            0U);
+
+        mask_evaluated_.assign(storage_.size(), false);
+        all_poses_allowed_.assign(storage_.size(), false);
+        poseMaskSlots_.clear();
+        allowedPoseMask_.clear();
+        allPoseMask_.clear();
+        lazyPoseFootprints_.reset();
+        lazyPoseFootprintBounds_.clear();
+        poseMaskWordCount_ = 0U;
+        morphologyPrefix_.reset();
+        prefixWidth_ = 0U;
+        prefixHeight_ = 0U;
+        prefixDepth_ = 0U;
+
+        rebuildOccupancyBlocks();
     }
 
     std::size_t index(
@@ -444,6 +562,10 @@ private:
     mutable std::vector<bool> all_poses_allowed_;
     mutable std::unordered_map<std::size_t, std::uint32_t> poseMaskSlots_;
     mutable std::vector<std::uint64_t> allowedPoseMask_;
+    std::shared_ptr<const std::vector<std::uint64_t>> morphologyPrefix_;
+    std::uint32_t prefixWidth_ = 0U;
+    std::uint32_t prefixHeight_ = 0U;
+    std::uint32_t prefixDepth_ = 0U;
     std::shared_ptr<
         const std::vector<std::vector<voxel_planner::VoxelOffset>>>
         lazyPoseFootprints_;
@@ -540,6 +662,17 @@ private:
              poseId < lazyPoseFootprints_->size();
              ++poseId) {
             bool collides = false;
+            if (poseId < lazyPoseFootprintBounds_.size() &&
+                isObstacleFreeBox(
+                    anchorX,
+                    anchorY,
+                    anchorZ,
+                    lazyPoseFootprintBounds_[poseId])) {
+                localMask[poseId / 64U] |=
+                    std::uint64_t{1} << (poseId % 64U);
+                ++validPoseCount;
+                continue;
+            }
             for (const voxel_planner::VoxelOffset& offset :
                  (*lazyPoseFootprints_)[poseId]) {
                 const int x = anchorX + offset.dx;
@@ -593,6 +726,7 @@ private:
     }
 
     friend class module2_morphology::VoxelIO;
+    friend class module2_morphology::VoxelMorphologyEngine;
     friend class module2_morphology::PoseMaskPopulator;
     friend class module3_astar::CoarseAStar;
     friend class module3_astar::PoseTransitionValidator;

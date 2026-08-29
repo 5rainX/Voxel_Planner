@@ -28,6 +28,7 @@ find_package(OpenMP REQUIRED COMPONENTS CXX)
 add_library(voxel_planner STATIC
     src/PoseGenerator.cpp
     src/PoseMaskPopulation.cpp
+    src/VoxelMorphologyEngine.cpp
     src/PoseTransitionValidation.cpp
     src/SweptVolume.cpp
     src/JumpAStar.cpp

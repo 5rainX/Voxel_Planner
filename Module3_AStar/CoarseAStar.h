@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Module1_Main/Types.h"
+#include "Module2_Morphology/VoxelMorphologyEngine.h"
 #include "Module3_AStar/PoseTransitionValidation.h"
 #include "Module2_Morphology/SweptVolume.h"
 
@@ -41,7 +42,8 @@ public:
         const voxel_planner::PlannerConfig& config,
         Point3D rawStart,
         Point3D rawGoal,
-        float endpointImmunityRadius) {
+        float endpointImmunityRadius,
+        const std::vector<Point3D>* topologyHint = nullptr) {
         PlanningResult result;
         const int boundedMaxPaths = std::min(
             maxPaths,
@@ -165,7 +167,9 @@ public:
                 goalKey / poses.size(),
                 rawStart,
                 rawGoal,
-                endpointImmunityRadius);
+                endpointImmunityRadius,
+                topologyHint,
+                std::max(config.busbar_width * 2.0F, 30.0F));
         } catch (const std::bad_alloc&) {
             result.error_code = ErrorCode::MEMORY_ALLOCATION_FAILED;
             result.message =
@@ -611,6 +615,11 @@ private:
     static constexpr float kCenterlineReusePenalty = 100000.0F;
     static constexpr float kNeighborReusePenalty = 1000.0F;
 
+    static const std::vector<Point3D>& emptyTopologyHint() {
+        static const std::vector<Point3D> empty;
+        return empty;
+    }
+
     static bool isTwistAction(std::uint32_t action) noexcept {
         return action != kStraightAction &&
             action != kNoAction &&
@@ -711,11 +720,107 @@ private:
         if (sweep.empty()) {
             return false;
         }
-        if (map.isObstacleFreeBox(
-                anchor.x,
-                anchor.y,
-                anchor.z,
-                bounds)) {
+        if (map.morphologyPrefix_) {
+            const bool prefixFree =
+                module2_morphology::VoxelMorphologyEngine::
+                    isBoxCollisionFree(
+                        *map.morphologyPrefix_,
+                        map.prefixWidth_,
+                        map.prefixHeight_,
+                        map.prefixDepth_,
+                        anchor.x,
+                        anchor.y,
+                        anchor.z,
+                        bounds);
+            if (prefixFree) {
+                return true;
+            }
+        } else if (map.isObstacleFreeBox(
+                       anchor.x,
+                       anchor.y,
+                       anchor.z,
+                       bounds)) {
+            return true;
+        }
+
+        // A rotated footprint can make its enclosing box much larger than
+        // the actual sweep. Split it into three slabs and use the same
+        // O(1) query on each local box before falling back to exact offsets.
+        if (map.morphologyPrefix_ && bounds.valid) {
+            const int spanX = bounds.maxDx - bounds.minDx;
+            const int spanY = bounds.maxDy - bounds.minDy;
+            const int spanZ = bounds.maxDz - bounds.minDz;
+            const int axis = spanX >= spanY && spanX >= spanZ
+                ? 0
+                : (spanY >= spanZ ? 1 : 2);
+            voxel_planner::VoxelOffsetBounds slabs[3];
+            std::uint8_t used[3] = {0U, 0U, 0U};
+            const int span = axis == 0
+                ? spanX
+                : (axis == 1 ? spanY : spanZ);
+            for (const voxel_planner::VoxelOffset& offset : sweep) {
+                const int coordinate = axis == 0
+                    ? offset.dx
+                    : (axis == 1 ? offset.dy : offset.dz);
+                const int relative = coordinate -
+                    (axis == 0
+                        ? bounds.minDx
+                        : (axis == 1 ? bounds.minDy : bounds.minDz));
+                const int slab = span == 0
+                    ? 0
+                    : std::min(2, (relative * 3) / (span + 1));
+                if (used[slab] == 0U) {
+                    slabs[slab].minDx = slabs[slab].maxDx = offset.dx;
+                    slabs[slab].minDy = slabs[slab].maxDy = offset.dy;
+                    slabs[slab].minDz = slabs[slab].maxDz = offset.dz;
+                    slabs[slab].valid = true;
+                    used[slab] = 1U;
+                } else {
+                    slabs[slab].minDx = std::min(
+                        slabs[slab].minDx,
+                        offset.dx);
+                    slabs[slab].maxDx = std::max(
+                        slabs[slab].maxDx,
+                        offset.dx);
+                    slabs[slab].minDy = std::min(
+                        slabs[slab].minDy,
+                        offset.dy);
+                    slabs[slab].maxDy = std::max(
+                        slabs[slab].maxDy,
+                        offset.dy);
+                    slabs[slab].minDz = std::min(
+                        slabs[slab].minDz,
+                        offset.dz);
+                    slabs[slab].maxDz = std::max(
+                        slabs[slab].maxDz,
+                        offset.dz);
+                }
+            }
+            bool allSlabsFree = true;
+            for (int slab = 0; slab < 3; ++slab) {
+                if (used[slab] != 0U &&
+                    !module2_morphology::VoxelMorphologyEngine::
+                        isBoxCollisionFree(
+                        *map.morphologyPrefix_,
+                        map.prefixWidth_,
+                        map.prefixHeight_,
+                        map.prefixDepth_,
+                        anchor.x,
+                        anchor.y,
+                        anchor.z,
+                        slabs[slab])) {
+                    allSlabsFree = false;
+                    break;
+                }
+            }
+            if (allSlabsFree) {
+                return true;
+            }
+        } else if (map.isObstacleFreeBox(
+                       anchor.x,
+                       anchor.y,
+                       anchor.z,
+                       bounds)) {
             return true;
         }
         for (const voxel_planner::VoxelOffset& offset : sweep) {
@@ -915,7 +1020,9 @@ private:
         std::size_t goalVoxel,
         const Point3D& rawStart,
         const Point3D& rawGoal,
-        float endpointImmunityRadius) {
+        float endpointImmunityRadius,
+        const std::vector<Point3D>* topologyHint,
+        float topologyHintTolerance) {
         if (map.voxelCount() >
             static_cast<std::size_t>(
                 std::numeric_limits<std::uint32_t>::max())) {
@@ -933,6 +1040,16 @@ private:
             static_cast<std::uint64_t>(field.depth - 1U);
         const bool useCompactDistances = maximumDistance <
             BackwardDistanceField::kCompactUnreachable;
+
+        const std::size_t plane =
+            static_cast<std::size_t>(field.width) * field.height;
+        const double corridorRadius =
+            std::isfinite(topologyHintTolerance)
+                ? std::max(0.0F, topologyHintTolerance)
+                : 0.0F;
+        const double corridorRadiusSquared =
+            corridorRadius * corridorRadius;
+
         if (useCompactDistances) {
             field.compactDistances.assign(
                 map.voxelCount(),
@@ -952,8 +1069,29 @@ private:
         frontier.push_back(static_cast<std::uint32_t>(goalVoxel));
         field.reachableVoxels = 1U;
 
-        const std::size_t plane =
-            static_cast<std::size_t>(field.width) * field.height;
+        const auto withinTopologyCorridor =
+            [&](std::size_t candidate) noexcept {
+                if (topologyHint == nullptr || topologyHint->empty() ||
+                    candidate == startVoxel || candidate == goalVoxel) {
+                    return true;
+                }
+                const Point3D candidatePoint = pointFromVoxelIndex(
+                    map,
+                    candidate);
+                for (const Point3D& hintPoint : *topologyHint) {
+                    const double dx = static_cast<double>(
+                        candidatePoint.x - hintPoint.x);
+                    const double dy = static_cast<double>(
+                        candidatePoint.y - hintPoint.y);
+                    const double dz = static_cast<double>(
+                        candidatePoint.z - hintPoint.z);
+                    if (dx * dx + dy * dy + dz * dz <=
+                        corridorRadiusSquared) {
+                        return true;
+                    }
+                }
+                return false;
+            };
         std::uint32_t nextDistance = 1U;
         while (!frontier.empty()) {
             nextFrontier.clear();
@@ -964,6 +1102,9 @@ private:
                     : field.wideDistances[candidate] ==
                         BackwardDistanceField::kWideUnreachable;
                 if (!unvisited) {
+                    return;
+                }
+                if (!withinTopologyCorridor(candidate)) {
                     return;
                 }
 
@@ -1636,7 +1777,6 @@ private:
                 const TwistAction* twistAction = twist
                     ? &poseTwists[twistIndex]
                     : nullptr;
-
                 // O(1) center fail precedes footprint and sweep work.
                 if (!evaluated.endpointImmune &&
                     (map.isObstacle(evaluated.targetVoxel) ||

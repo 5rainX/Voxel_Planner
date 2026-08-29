@@ -3,10 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <queue>
 #include <stdexcept>
-#include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
 namespace module3_astar {
@@ -16,7 +17,6 @@ struct Direction {
     int dx = 0;
     int dy = 0;
     int dz = 0;
-    double cost = 0.0;
 };
 
 std::vector<Direction> makeDirections() {
@@ -31,9 +31,7 @@ std::vector<Direction> makeDirections() {
                 directions.push_back({
                     dx,
                     dy,
-                    dz,
-                    std::sqrt(static_cast<double>(
-                        dx * dx + dy * dy + dz * dz))});
+                    dz});
             }
         }
     }
@@ -44,24 +42,6 @@ const std::vector<Direction>& directions() {
     static const std::vector<Direction> value = makeDirections();
     return value;
 }
-
-struct EdgeKey {
-    std::size_t from = 0U;
-    std::size_t to = 0U;
-
-    bool operator==(const EdgeKey& other) const noexcept {
-        return from == other.from && to == other.to;
-    }
-};
-
-struct EdgeKeyHash {
-    std::size_t operator()(const EdgeKey& edge) const noexcept {
-        const std::size_t mixed =
-            edge.from ^ (edge.to + static_cast<std::size_t>(0x9e3779b9U) +
-                         (edge.from << 6U) + (edge.from >> 2U));
-        return mixed;
-    }
-};
 
 struct OpenNode {
     std::size_t index = 0U;
@@ -80,6 +60,20 @@ struct OpenNodeCompare {
 
 constexpr std::size_t kNoIndex =
     std::numeric_limits<std::size_t>::max();
+
+struct StateRecord {
+    double g = std::numeric_limits<double>::infinity();
+    std::size_t parent = kNoIndex;
+    bool closed = false;
+};
+
+constexpr int kMaxPathsPerRequest = 10;
+constexpr double kScoreEpsilon = 1e-12;
+constexpr int kHardBlockRadius = 18;
+constexpr int kMinimumHardBlockRadius = 4;
+constexpr int kEndpointProtectionRadius = 3;
+constexpr std::size_t kProtectedPathPrefix = 4U;
+constexpr std::size_t kProtectedPathSuffix = 4U;
 
 Point3D pointFromIndex(const VoxelGrid& map, std::size_t index) {
     const std::size_t plane =
@@ -105,11 +99,22 @@ double distance(const Point3D& lhs, const Point3D& rhs) {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+bool isHardBlocked(
+    const std::vector<std::uint8_t>& hardBlocked,
+    std::size_t index) noexcept {
+    return index < hardBlocked.size() && hardBlocked[index] != 0U;
+}
+
 bool segmentAllowed(
     const VoxelGrid& map,
     const Point3D& from,
     const Point3D& to,
-    const std::unordered_set<EdgeKey, EdgeKeyHash>& bannedEdges) {
+    const std::vector<std::uint8_t>& hardBlocked) {
+    if (!map.isValid(from.x, from.y, from.z) ||
+        !map.isValid(to.x, to.y, to.z)) {
+        return false;
+    }
+
     const int steps = std::max({
         std::abs(to.x - from.x),
         std::abs(to.y - from.y),
@@ -120,15 +125,17 @@ bool segmentAllowed(
 
     Point3D current = from;
     for (int step = 0; step < steps; ++step) {
+        const Point3D previous = current;
         Point3D next = current;
         next.x += (to.x > current.x) - (to.x < current.x);
         next.y += (to.y > current.y) - (to.y < current.y);
         next.z += (to.z > current.z) - (to.z < current.z);
+        if (next == previous) {
+            return false;
+        }
         if (!map.isValid(next.x, next.y, next.z) ||
             map.isRawObstacle(pointIndex(map, next)) ||
-            bannedEdges.find({
-                pointIndex(map, current),
-                pointIndex(map, next)}) != bannedEdges.end()) {
+            isHardBlocked(hardBlocked, pointIndex(map, next))) {
             return false;
         }
         current = next;
@@ -136,91 +143,80 @@ bool segmentAllowed(
     return current == to;
 }
 
-bool hasAdjacentRawObstacle(
-    const VoxelGrid& map,
-    const Point3D& point) {
-    for (int dz = -1; dz <= 1; ++dz) {
-        for (int dy = -1; dy <= 1; ++dy) {
-            for (int dx = -1; dx <= 1; ++dx) {
-                if (dx == 0 && dy == 0 && dz == 0) {
-                    continue;
-                }
-                const Point3D neighbor{
-                    point.x + dx,
-                    point.y + dy,
-                    point.z + dz};
-                if (!map.isValid(neighbor.x, neighbor.y, neighbor.z) ||
-                    map.isRawObstacle(pointIndex(map, neighbor))) {
-                    return true;
-                }
-            }
-        }
+bool appendSegmentPath(
+    const Point3D& to,
+    std::vector<Point3D>& path) {
+    if (path.empty()) {
+        path.push_back(to);
+        return true;
     }
-    return false;
+
+    const Point3D from = path.back();
+    const int steps = std::max({
+        std::abs(to.x - from.x),
+        std::abs(to.y - from.y),
+        std::abs(to.z - from.z)});
+    for (int step = 0; step < steps; ++step) {
+        Point3D current = path.back();
+        const Point3D previous = current;
+        current.x += (to.x > current.x) - (to.x < current.x);
+        current.y += (to.y > current.y) - (to.y < current.y);
+        current.z += (to.z > current.z) - (to.z < current.z);
+        if (current == previous) {
+            return false;
+        }
+        path.push_back(current);
+    }
+    return path.back() == to;
 }
 
-bool jumpCandidate(
-    const VoxelGrid& map,
-    const Point3D& origin,
-    const Direction& direction,
-    const Point3D& goal,
-    const std::unordered_set<EdgeKey, EdgeKeyHash>& bannedEdges,
-    Point3D& result) {
-    Point3D current = origin;
-    while (true) {
-        const Point3D next{
-            current.x + direction.dx,
-            current.y + direction.dy,
-            current.z + direction.dz};
-        if (!map.isValid(next.x, next.y, next.z) ||
-            map.isRawObstacle(pointIndex(map, next))) {
-            return current == origin
-                ? false
-                : segmentAllowed(map, origin, current, bannedEdges) &&
-                    (result = current, true);
-        }
-        current = next;
-        if (current == goal || hasAdjacentRawObstacle(map, current)) {
-            if (!segmentAllowed(map, origin, current, bannedEdges)) {
-                return false;
-            }
-            result = current;
-            return true;
-        }
+std::vector<Point3D> makeSegmentPath(
+    const Point3D& from,
+    const Point3D& to) {
+    std::vector<Point3D> path;
+    path.push_back(from);
+    if (!appendSegmentPath(to, path)) {
+        path.clear();
     }
+    return path;
 }
 
 std::vector<Point3D> runSearch(
     const VoxelGrid& map,
     const Point3D& start,
     const Point3D& goal,
-    const std::unordered_set<EdgeKey, EdgeKeyHash>& bannedEdges) {
+    const std::vector<std::uint8_t>& hardBlocked) {
     if (!map.isValid(start.x, start.y, start.z) ||
-        !map.isValid(goal.x, goal.y, goal.z) ||
-        map.isRawObstacle(pointIndex(map, start)) ||
-        map.isRawObstacle(pointIndex(map, goal))) {
+        !map.isValid(goal.x, goal.y, goal.z)) {
+        return {};
+    }
+
+    const std::size_t startIndex = pointIndex(map, start);
+    const std::size_t goalIndex = pointIndex(map, goal);
+    if (map.isRawObstacle(startIndex) ||
+        map.isRawObstacle(goalIndex) ||
+        isHardBlocked(hardBlocked, startIndex) ||
+        isHardBlocked(hardBlocked, goalIndex)) {
         return {};
     }
     if (start == goal) {
         return {start};
     }
+    if (segmentAllowed(map, start, goal, hardBlocked)) {
+        return makeSegmentPath(start, goal);
+    }
 
-    const std::size_t count = map.voxelCount();
-    const std::size_t startIndex = pointIndex(map, start);
-    const std::size_t goalIndex = pointIndex(map, goal);
-    std::vector<double> gScore(count, std::numeric_limits<double>::infinity());
-    std::vector<std::size_t> parent(count, kNoIndex);
-    std::vector<bool> closed(count, false);
+    std::unordered_map<std::size_t, StateRecord> records;
+    records.reserve(4096U);
     std::priority_queue<
         OpenNode,
         std::vector<OpenNode>,
         OpenNodeCompare> open;
 
-    gScore[startIndex] = 0.0;
+    records.emplace(startIndex, StateRecord{0.0, kNoIndex, false});
     open.push({startIndex, 0.0, distance(start, goal)});
 
     const auto relax = [&](std::size_t fromIndex,
-                           const Point3D& from,
                            const Point3D& to,
                            std::priority_queue<
                                OpenNode,
@@ -230,17 +226,31 @@ std::vector<Point3D> runSearch(
             map.isRawObstacle(pointIndex(map, to))) {
             return;
         }
+        const auto fromRecord = records.find(fromIndex);
+        if (fromRecord == records.end()) {
+            return;
+        }
         const std::size_t targetIndex = pointIndex(map, to);
-        if (closed[targetIndex] ||
-            !segmentAllowed(map, from, to, bannedEdges)) {
+        if (isHardBlocked(hardBlocked, targetIndex)) {
             return;
         }
-        const double tentative = gScore[fromIndex] + distance(from, to);
-        if (tentative + 1e-12 >= gScore[targetIndex]) {
+        const double tentative =
+            fromRecord->second.g +
+            distance(pointFromIndex(map, fromIndex), to);
+        auto targetRecord = records.find(targetIndex);
+        if (targetRecord != records.end() &&
+            (targetRecord->second.closed ||
+             tentative + kScoreEpsilon >= targetRecord->second.g)) {
             return;
         }
-        gScore[targetIndex] = tentative;
-        parent[targetIndex] = fromIndex;
+        if (targetRecord == records.end()) {
+            targetRecord = records.emplace(
+                targetIndex,
+                StateRecord{}).first;
+        }
+        targetRecord->second.g = tentative;
+        targetRecord->second.parent = fromIndex;
+        targetRecord->second.closed = false;
         queue.push({
             targetIndex,
             tentative,
@@ -250,51 +260,58 @@ std::vector<Point3D> runSearch(
     while (!open.empty()) {
         const OpenNode currentNode = open.top();
         open.pop();
-        if (closed[currentNode.index] ||
-            currentNode.g > gScore[currentNode.index] + 1e-12) {
+        const auto currentRecord = records.find(currentNode.index);
+        if (currentRecord == records.end() ||
+            currentRecord->second.closed ||
+            currentNode.g > currentRecord->second.g + kScoreEpsilon) {
             continue;
         }
-        closed[currentNode.index] = true;
+        currentRecord->second.closed = true;
         if (currentNode.index == goalIndex) {
             break;
         }
 
         const Point3D current = pointFromIndex(map, currentNode.index);
         for (const Direction& direction : directions()) {
-            const Point3D neighbor{
-                current.x + direction.dx,
-                current.y + direction.dy,
-                current.z + direction.dz};
-            relax(currentNode.index, current, neighbor, open);
-        }
-
-        for (const Direction& direction : directions()) {
-            Point3D jumpPoint{};
-            if (jumpCandidate(
-                    map,
-                    current,
-                    direction,
-                    goal,
-                    bannedEdges,
-                    jumpPoint) &&
-                !(jumpPoint == current)) {
-                relax(currentNode.index, current, jumpPoint, open);
+            const std::int64_t neighborX =
+                static_cast<std::int64_t>(current.x) + direction.dx;
+            const std::int64_t neighborY =
+                static_cast<std::int64_t>(current.y) + direction.dy;
+            const std::int64_t neighborZ =
+                static_cast<std::int64_t>(current.z) + direction.dz;
+            if (neighborX < 0 || neighborY < 0 || neighborZ < 0 ||
+                neighborX >= static_cast<std::int64_t>(map.width()) ||
+                neighborY >= static_cast<std::int64_t>(map.height()) ||
+                neighborZ >= static_cast<std::int64_t>(map.depth())) {
+                continue;
             }
+            const Point3D neighbor{
+                static_cast<int>(neighborX),
+                static_cast<int>(neighborY),
+                static_cast<int>(neighborZ)};
+            relax(currentNode.index, neighbor, open);
         }
     }
 
-    if (!closed[goalIndex]) {
+    const auto goalRecord = records.find(goalIndex);
+    if (goalRecord == records.end() || !goalRecord->second.closed) {
         return {};
     }
 
     std::vector<std::size_t> reversed;
-    for (std::size_t current = goalIndex;
-         current != kNoIndex;
-         current = parent[current]) {
-        reversed.push_back(current);
-        if (current == startIndex) {
+    std::size_t currentIndex = goalIndex;
+    for (std::size_t hops = 0U;
+         currentIndex != kNoIndex && hops <= records.size();
+         ++hops) {
+        reversed.push_back(currentIndex);
+        if (currentIndex == startIndex) {
             break;
         }
+        const auto record = records.find(currentIndex);
+        if (record == records.end()) {
+            return {};
+        }
+        currentIndex = record->second.parent;
     }
     if (reversed.empty() || reversed.back() != startIndex) {
         return {};
@@ -304,28 +321,129 @@ std::vector<Point3D> runSearch(
     std::vector<Point3D> path;
     path.push_back(start);
     for (std::size_t i = 1U; i < reversed.size(); ++i) {
-        const Point3D from = pointFromIndex(map, reversed[i - 1U]);
         const Point3D to = pointFromIndex(map, reversed[i]);
-        Point3D current = from;
-        while (!(current == to)) {
-            current.x += (to.x > current.x) - (to.x < current.x);
-            current.y += (to.y > current.y) - (to.y < current.y);
-            current.z += (to.z > current.z) - (to.z < current.z);
-            path.push_back(current);
+        if (!appendSegmentPath(to, path)) {
+            return {};
         }
     }
     return path;
 }
 
-void banPathEdges(
+bool nearProtectedEndpoint(
+    const Point3D& point,
+    const Point3D& start,
+    const Point3D& goal) {
+    const auto insideRadius = [](const Point3D& lhs, const Point3D& rhs) {
+        return std::max({
+            std::abs(lhs.x - rhs.x),
+            std::abs(lhs.y - rhs.y),
+            std::abs(lhs.z - rhs.z)}) <= kEndpointProtectionRadius;
+    };
+    return insideRadius(point, start) || insideRadius(point, goal);
+}
+
+void hardBlockCube(
+    const VoxelGrid& map,
+    const Point3D& center,
+    const Point3D& start,
+    const Point3D& goal,
+    int radius,
+    std::vector<std::uint8_t>& hardBlocked) {
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                const Point3D blocked{
+                    center.x + dx,
+                    center.y + dy,
+                    center.z + dz};
+                if (!map.isValid(blocked.x, blocked.y, blocked.z) ||
+                    nearProtectedEndpoint(blocked, start, goal)) {
+                    continue;
+                }
+                hardBlocked[pointIndex(map, blocked)] = 1U;
+            }
+        }
+    }
+}
+
+void hardBlockPathCorridor(
     const VoxelGrid& map,
     const std::vector<Point3D>& path,
-    std::unordered_set<EdgeKey, EdgeKeyHash>& bannedEdges) {
-    for (std::size_t i = 1U; i < path.size(); ++i) {
-        const std::size_t from = pointIndex(map, path[i - 1U]);
-        const std::size_t to = pointIndex(map, path[i]);
-        bannedEdges.insert({from, to});
-        bannedEdges.insert({to, from});
+    const Point3D& start,
+    const Point3D& goal,
+    int radius,
+    std::vector<std::uint8_t>& hardBlocked) {
+    if (hardBlocked.size() != map.voxelCount() ||
+        path.size() <= 2U ||
+        radius <= 0) {
+        return;
+    }
+    std::size_t begin = std::min(kProtectedPathPrefix, path.size() - 1U);
+    std::size_t end = path.size() > kProtectedPathSuffix
+        ? path.size() - kProtectedPathSuffix
+        : begin;
+    if (begin >= end) {
+        begin = path.size() / 2U;
+        end = begin + 1U;
+    }
+    const std::size_t centerStride =
+        static_cast<std::size_t>(std::max(1, radius));
+    for (std::size_t pathIndex = begin;
+         pathIndex < end;
+         pathIndex += centerStride) {
+        hardBlockCube(
+            map,
+            path[pathIndex],
+            start,
+            goal,
+            radius,
+            hardBlocked);
+    }
+    if (end > begin && (end - 1U - begin) % centerStride != 0U) {
+        hardBlockCube(
+            map,
+            path[end - 1U],
+            start,
+            goal,
+            radius,
+            hardBlocked);
+    }
+}
+
+bool samePath(
+    const std::vector<Point3D>& lhs,
+    const std::vector<Point3D>& rhs) {
+    return lhs.size() == rhs.size() &&
+        std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
+bool alreadyReturned(
+    const std::vector<std::vector<Point3D>>& paths,
+    const std::vector<Point3D>& candidate) {
+    for (const std::vector<Point3D>& path : paths) {
+        if (samePath(path, candidate)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void rebuildHardBlockMask(
+    const VoxelGrid& map,
+    const std::vector<std::vector<Point3D>>& paths,
+    const Point3D& start,
+    const Point3D& goal,
+    int radius,
+    std::vector<std::uint8_t>& hardBlocked) {
+    std::fill(hardBlocked.begin(), hardBlocked.end(), 0U);
+    for (const std::vector<Point3D>& path : paths) {
+        hardBlockPathCorridor(
+            map,
+            path,
+            start,
+            goal,
+            radius,
+            hardBlocked);
     }
 }
 
@@ -341,15 +459,32 @@ std::vector<std::vector<Point3D>> JumpAStar::findPaths(
     }
 
     std::vector<std::vector<Point3D>> paths;
-    std::unordered_set<EdgeKey, EdgeKeyHash> bannedEdges;
-    for (int pathIndex = 0; pathIndex < maxPaths; ++pathIndex) {
+    std::vector<std::uint8_t> hardBlocked(map.voxelCount(), 0U);
+    const int boundedMaxPaths = std::min(maxPaths, kMaxPathsPerRequest);
+    int blockadeRadius = kHardBlockRadius;
+    while (static_cast<int>(paths.size()) < boundedMaxPaths) {
+        rebuildHardBlockMask(
+            map,
+            paths,
+            start,
+            goal,
+            blockadeRadius,
+            hardBlocked);
         std::vector<Point3D> path =
-            runSearch(map, start, goal, bannedEdges);
+            runSearch(map, start, goal, hardBlocked);
         if (path.empty()) {
+            if (!paths.empty() && blockadeRadius > kMinimumHardBlockRadius) {
+                blockadeRadius = std::max(
+                    kMinimumHardBlockRadius,
+                    blockadeRadius / 2);
+                continue;
+            }
             break;
         }
-        paths.push_back(path);
-        banPathEdges(map, path, bannedEdges);
+        if (alreadyReturned(paths, path)) {
+            break;
+        }
+        paths.push_back(std::move(path));
     }
     return paths;
 }
