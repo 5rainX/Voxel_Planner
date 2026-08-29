@@ -986,7 +986,7 @@ ProcessedMap loadMap(
             rawGrid,
             module2_morphology::MorphologyKernel{
                 kernelWidth,
-                kernelWidth,
+                kernelThickness,
                 kernelThickness});
     impl->grid = std::move(morphology.grid);
     impl->morphologyOffset = morphology.originOffset;
