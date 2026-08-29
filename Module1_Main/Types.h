@@ -36,6 +36,7 @@ struct PathResult {
     std::vector<Point3D> path;
     std::vector<Pose> pose_description;
     double cost = std::numeric_limits<double>::infinity();
+    bool goal_tolerance_accepted = false;
 };
 
 enum class PlannerStatus : std::uint8_t {

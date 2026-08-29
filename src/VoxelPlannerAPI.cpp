@@ -171,7 +171,22 @@ voxel_planner::Point3D addOffset(
     return {point.x + offset.x, point.y + offset.y, point.z + offset.z};
 }
 
-constexpr int kHintProjectionMaxRadius = 4;
+constexpr int kHintProjectionMaxRadius = 12;
+constexpr double kMinimumHintProjectionSuccessRatio = 0.25;
+
+struct HintProjectionSample {
+    voxel_planner::Point3D shifted{};
+    voxel_planner::Point3D projected{};
+    bool success = false;
+};
+
+struct HintProjectionResult {
+    std::vector<voxel_planner::Point3D> points;
+    std::size_t sourcePointCount = 0U;
+    std::size_t projectedPointCount = 0U;
+    std::size_t filledPointCount = 0U;
+    double successRate = 0.0;
+};
 
 bool isGridObstacle(
     const VoxelGrid& grid,
@@ -240,6 +255,164 @@ bool tryProjectHintPointToFreeSpace(
     return false;
 }
 
+voxel_planner::Point3D interpolateHintPoint(
+    const voxel_planner::Point3D& from,
+    const voxel_planner::Point3D& to,
+    std::size_t numerator,
+    std::size_t denominator) {
+    if (denominator == 0U) {
+        return from;
+    }
+    const double ratio =
+        static_cast<double>(numerator) / static_cast<double>(denominator);
+    return {
+        static_cast<int>(std::lround(
+            static_cast<double>(from.x) +
+            static_cast<double>(to.x - from.x) * ratio)),
+        static_cast<int>(std::lround(
+            static_cast<double>(from.y) +
+            static_cast<double>(to.y - from.y) * ratio)),
+        static_cast<int>(std::lround(
+            static_cast<double>(from.z) +
+            static_cast<double>(to.z - from.z) * ratio))};
+}
+
+void appendHintPointDeduplicated(
+    std::vector<voxel_planner::Point3D>& points,
+    const voxel_planner::Point3D& point) {
+    if (points.empty() || !(points.back() == point)) {
+        points.push_back(point);
+    }
+}
+
+bool appendProjectedHintSegment(
+    const VoxelGrid& grid,
+    const voxel_planner::Point3D& target,
+    std::vector<voxel_planner::Point3D>& points) {
+    if (points.empty()) {
+        appendHintPointDeduplicated(points, target);
+        return true;
+    }
+
+    voxel_planner::Point3D ideal = points.back();
+    while (!(ideal == target)) {
+        ideal.x += stepToward(ideal.x, target.x);
+        ideal.y += stepToward(ideal.y, target.y);
+        ideal.z += stepToward(ideal.z, target.z);
+
+        voxel_planner::Point3D projected{};
+        if (!tryProjectHintPointToFreeSpace(grid, ideal, projected)) {
+            // The target was already projected successfully. Clamp the
+            // unresolved gap to that legal endpoint rather than emitting a
+            // failed or obstructed intermediate voxel.
+            appendHintPointDeduplicated(points, target);
+            return false;
+        }
+        appendHintPointDeduplicated(points, projected);
+    }
+    return true;
+}
+
+HintProjectionResult projectTopologyHintToExpandedGrid(
+    const VoxelGrid& grid,
+    const std::vector<voxel_planner::Point3D>& sourcePoints,
+    const voxel_planner::Point3D& morphologyOffset) {
+    HintProjectionResult result;
+    result.sourcePointCount = sourcePoints.size();
+    if (sourcePoints.empty()) {
+        return result;
+    }
+
+    std::vector<HintProjectionSample> samples(sourcePoints.size());
+    std::size_t successCount = 0U;
+    for (std::size_t index = 0U; index < sourcePoints.size(); ++index) {
+        HintProjectionSample& sample = samples[index];
+        sample.shifted = addOffset(sourcePoints[index], morphologyOffset);
+        sample.success = tryProjectHintPointToFreeSpace(
+            grid,
+            sample.shifted,
+            sample.projected);
+        if (sample.success) {
+            ++successCount;
+            if (!(sample.projected == sample.shifted)) {
+                ++result.projectedPointCount;
+            }
+        }
+    }
+
+    result.successRate =
+        static_cast<double>(successCount) /
+        static_cast<double>(sourcePoints.size());
+    if (result.successRate <= kMinimumHintProjectionSuccessRatio) {
+        return result;
+    }
+
+    std::vector<int> previousSuccess(samples.size(), -1);
+    std::vector<int> nextSuccess(samples.size(), -1);
+    int lastSuccess = -1;
+    for (std::size_t index = 0U; index < samples.size(); ++index) {
+        if (samples[index].success) {
+            lastSuccess = static_cast<int>(index);
+        }
+        previousSuccess[index] = lastSuccess;
+    }
+    int upcomingSuccess = -1;
+    for (std::size_t reverseIndex = samples.size();
+         reverseIndex > 0U;
+         --reverseIndex) {
+        const std::size_t index = reverseIndex - 1U;
+        if (samples[index].success) {
+            upcomingSuccess = static_cast<int>(index);
+        }
+        nextSuccess[index] = upcomingSuccess;
+    }
+
+    for (std::size_t index = 0U; index < samples.size(); ++index) {
+        voxel_planner::Point3D projected{};
+        if (samples[index].success) {
+            projected = samples[index].projected;
+        } else {
+            const int previous = previousSuccess[index];
+            const int next = nextSuccess[index];
+            if (previous >= 0 && next >= 0 && previous != next) {
+                const std::size_t numerator =
+                    index - static_cast<std::size_t>(previous);
+                const std::size_t denominator =
+                    static_cast<std::size_t>(next - previous);
+                const voxel_planner::Point3D interpolated =
+                    interpolateHintPoint(
+                        samples[static_cast<std::size_t>(previous)].projected,
+                        samples[static_cast<std::size_t>(next)].projected,
+                        numerator,
+                        denominator);
+                if (!tryProjectHintPointToFreeSpace(
+                        grid,
+                        interpolated,
+                        projected)) {
+                    // If the rounded interpolation still lands in a solid
+                    // region, clamp to the nearest already-valid endpoint.
+                    projected = numerator * 2U <= denominator
+                        ? samples[static_cast<std::size_t>(previous)].projected
+                        : samples[static_cast<std::size_t>(next)].projected;
+                }
+            } else if (previous >= 0) {
+                projected =
+                    samples[static_cast<std::size_t>(previous)].projected;
+            } else if (next >= 0) {
+                projected = samples[static_cast<std::size_t>(next)].projected;
+            } else {
+                return result;
+            }
+            ++result.filledPointCount;
+        }
+
+        if (!appendProjectedHintSegment(grid, projected, result.points)) {
+            appendHintPointDeduplicated(result.points, projected);
+        }
+    }
+    return result;
+}
+
 void translatePathToPublicCoordinates(
     std::vector<voxel_planner::Point3D>& path,
     const voxel_planner::Point3D& offset) {
@@ -247,6 +420,60 @@ void translatePathToPublicCoordinates(
         point.x -= offset.x;
         point.y -= offset.y;
         point.z -= offset.z;
+    }
+}
+
+bool sameVoxelPath(
+    const std::vector<Point3D>& lhs,
+    const std::vector<Point3D>& rhs) {
+    return lhs.size() == rhs.size() &&
+        std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
+bool containsVoxelPath(
+    const std::vector<::PathResult>& paths,
+    const std::vector<Point3D>& candidate) {
+    for (const ::PathResult& path : paths) {
+        if (sameVoxelPath(path.path, candidate)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void deduplicatePlanningPaths(
+    ::PlanningResult& result,
+    std::size_t maximumCount) {
+    std::vector<::PathResult> uniquePaths;
+    uniquePaths.reserve(std::min(
+        result.paths.size(),
+        maximumCount));
+    for (::PathResult& candidate : result.paths) {
+        if (candidate.path.empty() ||
+            containsVoxelPath(uniquePaths, candidate.path)) {
+            continue;
+        }
+        uniquePaths.push_back(std::move(candidate));
+        if (uniquePaths.size() >= maximumCount) {
+            break;
+        }
+    }
+    result.paths = std::move(uniquePaths);
+}
+
+void mergeFallbackPlanningPaths(
+    ::PlanningResult& destination,
+    ::PlanningResult&& fallback,
+    std::size_t maximumCount) {
+    for (::PathResult& candidate : fallback.paths) {
+        if (destination.paths.size() >= maximumCount) {
+            break;
+        }
+        if (candidate.path.empty() ||
+            containsVoxelPath(destination.paths, candidate.path)) {
+            continue;
+        }
+        destination.paths.push_back(std::move(candidate));
     }
 }
 
@@ -416,6 +643,12 @@ struct ResolvedEndpoint {
     std::uint32_t poseId = std::numeric_limits<std::uint32_t>::max();
 };
 
+struct FallbackEndpointSnap {
+    voxel_planner::Point3D point{};
+    std::uint32_t poseId = std::numeric_limits<std::uint32_t>::max();
+    bool shifted = false;
+};
+
 ResolvedEndpoint resolveEndpointOutsideTerminal(
     const VoxelGrid& grid,
     const voxel_planner::Point3D& rawPoint,
@@ -547,6 +780,102 @@ ResolvedEndpoint resolveEndpointOutsideTerminal(
     throw std::invalid_argument(
         std::string("No collision-free pose matches the requested ") +
         endpointName + " tangent before the map boundary.");
+}
+
+FallbackEndpointSnap snapEndpointToFreeSpaceForFallback(
+    const VoxelGrid& grid,
+    const voxel_planner::Point3D& seed,
+    const voxel_planner::Vector3D& requestedTangent,
+    const std::vector<voxel_planner::BusbarPose>& poses,
+    const char* endpointName) {
+    if (!grid.isValid(seed.x, seed.y, seed.z)) {
+        throw std::invalid_argument(
+            std::string("Fallback ") + endpointName +
+            " point is outside the voxel map.");
+    }
+
+    constexpr int kFallbackEndpointSnapRadius = 8;
+    const auto isFree = [&](const voxel_planner::Point3D& point) {
+        if (!grid.isValid(point.x, point.y, point.z)) {
+            return false;
+        }
+        const std::size_t index = grid.index(
+            static_cast<std::uint32_t>(point.x),
+            static_cast<std::uint32_t>(point.y),
+            static_cast<std::uint32_t>(point.z));
+        return !grid.isObstacle(index);
+    };
+
+    const auto considerCandidate =
+        [&](const voxel_planner::Point3D& candidate,
+            FallbackEndpointSnap& best,
+            bool& found) {
+            if (!isFree(candidate)) {
+                return;
+            }
+            const std::uint32_t poseId = findNearestAllowedEndpointPose(
+                grid,
+                candidate,
+                requestedTangent,
+                poses,
+                true);
+            if (poseId == std::numeric_limits<std::uint32_t>::max()) {
+                return;
+            }
+            const int dx = candidate.x - seed.x;
+            const int dy = candidate.y - seed.y;
+            const int dz = candidate.z - seed.z;
+            const int distanceSquared = dx * dx + dy * dy + dz * dz;
+            const int bestDx = best.point.x - seed.x;
+            const int bestDy = best.point.y - seed.y;
+            const int bestDz = best.point.z - seed.z;
+            const int bestDistanceSquared =
+                bestDx * bestDx + bestDy * bestDy + bestDz * bestDz;
+            if (!found ||
+                distanceSquared < bestDistanceSquared ||
+                (distanceSquared == bestDistanceSquared &&
+                 std::tie(candidate.z, candidate.y, candidate.x) <
+                 std::tie(best.point.z, best.point.y, best.point.x))) {
+                best.point = candidate;
+                best.poseId = poseId;
+                best.shifted = !(candidate == seed);
+                found = true;
+            }
+        };
+
+    FallbackEndpointSnap best{seed, std::numeric_limits<std::uint32_t>::max(), false};
+    bool found = false;
+    considerCandidate(seed, best, found);
+    if (found) {
+        return best;
+    }
+
+    for (int radius = 1; radius <= kFallbackEndpointSnapRadius; ++radius) {
+        for (int dz = -radius; dz <= radius; ++dz) {
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    if (std::max({
+                            std::abs(dx),
+                            std::abs(dy),
+                            std::abs(dz)}) != radius) {
+                        continue;
+                    }
+                    const voxel_planner::Point3D candidate{
+                        seed.x + dx,
+                        seed.y + dy,
+                        seed.z + dz};
+                    considerCandidate(candidate, best, found);
+                }
+            }
+        }
+        if (found) {
+            return best;
+        }
+    }
+
+    throw std::invalid_argument(
+        std::string("No free-space fallback root could be found for ") +
+        endpointName + ".");
 }
 
 } // namespace
@@ -773,61 +1102,56 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         if (!centerline.empty() &&
             centerline.front() == jumpSafeStart &&
             centerline.back() == jumpSafeGoal) {
-            std::vector<Point3D> topologyHintInternal;
-            topologyHintInternal.reserve(centerline.size() + 2U);
-            std::size_t projectedPointCount = 0U;
-            std::size_t sourcePointCount = 0U;
-            bool projectionFailed = false;
-            const auto appendHintPoint = [&](const Point3D& point) {
-                ++sourcePointCount;
-                const Point3D shifted =
-                    addOffset(point, map.impl_->morphologyOffset);
-                Point3D projected{};
-                if (!tryProjectHintPointToFreeSpace(
-                        map.impl_->grid,
-                        shifted,
-                        projected)) {
-                    projectionFailed = true;
-                    return;
-                }
-                if (!(projected == shifted)) {
-                    ++projectedPointCount;
-                }
-                if (topologyHintInternal.empty() ||
-                    !(topologyHintInternal.back() == projected)) {
-                    topologyHintInternal.push_back(projected);
-                }
-            };
-            appendHintPoint(start);
+            std::vector<Point3D> sourceHintPoints;
+            sourceHintPoints.reserve(centerline.size() + 2U);
+            sourceHintPoints.push_back(start);
             for (const Point3D& point : centerline) {
-                if (projectionFailed) {
-                    break;
+                if (sourceHintPoints.empty() ||
+                    !(sourceHintPoints.back() == point)) {
+                    sourceHintPoints.push_back(point);
                 }
-                appendHintPoint(point);
             }
-            if (!projectionFailed) {
-                appendHintPoint(goal);
+            if (sourceHintPoints.empty() ||
+                !(sourceHintPoints.back() == goal)) {
+                sourceHintPoints.push_back(goal);
             }
-            if (projectionFailed || topologyHintInternal.size() < 2U) {
+
+            HintProjectionResult projection =
+                projectTopologyHintToExpandedGrid(
+                    map.impl_->grid,
+                    sourceHintPoints,
+                    map.impl_->morphologyOffset);
+            if (projection.points.size() < 2U ||
+                projection.successRate <=
+                    kMinimumHintProjectionSuccessRatio) {
                 logProfileMessage(
                     "Discarded JumpAStar hint[" +
                     std::to_string(pathIndex) +
                     "] after morphology projection; source_points=" +
-                    std::to_string(sourcePointCount) +
-                    ", projected_points=" +
-                    std::to_string(projectedPointCount));
+                    std::to_string(projection.sourcePointCount) +
+                    ", success_rate=" +
+                    std::to_string(projection.successRate * 100.0) +
+                    "%");
                 continue;
             }
             logProfileMessage(
                 "Projected JumpAStar hint[" +
                 std::to_string(pathIndex) +
                 "] onto expanded grid; source_points=" +
-                std::to_string(sourcePointCount) +
+                std::to_string(projection.sourcePointCount) +
                 ", output_points=" +
-                std::to_string(topologyHintInternal.size()) +
+                std::to_string(projection.points.size()) +
+                ", success_rate=" +
+                std::to_string(projection.successRate * 100.0) +
+                "%, snapped_points=" +
+                std::to_string(projection.projectedPointCount) +
+                ", filled_points=" +
+                std::to_string(projection.filledPointCount) +
                 ", corrected_points=" +
-                std::to_string(projectedPointCount));
-            topologyHintsInternal.push_back(std::move(topologyHintInternal));
+                std::to_string(
+                    projection.projectedPointCount +
+                    projection.filledPointCount));
+            topologyHintsInternal.push_back(std::move(projection.points));
         }
     }
     logProfileMessage(
@@ -880,8 +1204,10 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         map.impl_->poses,
         "end",
         kEndpointImmunityRadius);
-    const Point3D& safeStart = resolvedPoseStart.point;
-    const Point3D& safeGoal = resolvedPoseGoal.point;
+    ResolvedEndpoint selectedPoseStart = resolvedPoseStart;
+    ResolvedEndpoint selectedPoseGoal = resolvedPoseGoal;
+    const Point3D& safeStart = selectedPoseStart.point;
+    const Point3D& safeGoal = selectedPoseGoal.point;
     const auto endpointResolutionEnd = ProfileClock::now();
     logProfileStageEnd(
         "SE3 endpoint resolution",
@@ -902,20 +1228,35 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     if (topologyHintsInternal.empty()) {
         logProfileMessage("Topology hints unavailable; coarse fallback uses none");
     }
+    const auto runCoarseSearch =
+        [&](const ResolvedEndpoint& searchStart,
+            const ResolvedEndpoint& searchGoal,
+            const std::vector<Point3D>* topologyHint,
+            bool allowFullSearch,
+            std::size_t maxExpansionsOverride) {
+            return module3_astar::CoarseAStar::findPaths(
+                map.impl_->grid,
+                ::PoseState{searchStart.point, searchStart.poseId},
+                ::PoseState{searchGoal.point, searchGoal.poseId},
+                max_paths,
+                map.impl_->poses,
+                map.impl_->config,
+                internalStart,
+                internalGoal,
+                kEndpointImmunityRadius,
+                topologyHint,
+                allowFullSearch,
+                maxExpansionsOverride);
+        };
     const auto coarseStart = ProfileClock::now();
-    ::PlanningResult result = module3_astar::CoarseAStar::findPaths(
-        map.impl_->grid,
-        ::PoseState{safeStart, resolvedPoseStart.poseId},
-        ::PoseState{safeGoal, resolvedPoseGoal.poseId},
-        max_paths,
-        map.impl_->poses,
-        map.impl_->config,
-        internalStart,
-        internalGoal,
-        kEndpointImmunityRadius,
-        topologyHintsInternal.empty()
-            ? nullptr
-            : &topologyHintsInternal.front());
+    ::PlanningResult result = runCoarseSearch(
+        selectedPoseStart,
+        selectedPoseGoal,
+            topologyHintsInternal.empty()
+                ? nullptr
+                : &topologyHintsInternal.front(),
+        false,
+        0U);
     const auto coarseEnd = ProfileClock::now();
     logProfileStageEnd("CoarseAStar::findPaths total", coarseEnd - coarseStart);
     logProfileMessage(
@@ -925,6 +1266,152 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         std::to_string(static_cast<int>(result.error_code)) +
         ", internal_paths=" + std::to_string(result.paths.size()) +
         ", message=" + result.message);
+
+    const std::size_t requestedPathCount =
+        static_cast<std::size_t>(max_paths);
+    deduplicatePlanningPaths(result, requestedPathCount);
+    const bool retryableCoarseResult =
+        result.error_code == ::ErrorCode::NONE ||
+        result.error_code == ::ErrorCode::PATH_NOT_FOUND ||
+        result.error_code == ::ErrorCode::COMPUTATION_LIMIT_EXCEEDED ||
+        result.error_code == ::ErrorCode::START_POINT_BLOCKED ||
+        result.error_code == ::ErrorCode::END_POINT_BLOCKED;
+    if ((!topologyHintsInternal.empty() || result.paths.empty()) &&
+        result.paths.size() < requestedPathCount &&
+        retryableCoarseResult) {
+        logProfileMessage(
+            "CoarseAStar produced " +
+            std::to_string(result.paths.size()) +
+            " unique paths; starting fallback full coarse search for " +
+            std::to_string(
+                requestedPathCount - result.paths.size()) +
+            " additional paths.");
+        const auto fallbackStart = ProfileClock::now();
+        constexpr std::size_t kFallbackMaxExpansions = 150000U;
+        ::PlanningResult fallbackResult = runCoarseSearch(
+            selectedPoseStart,
+            selectedPoseGoal,
+            nullptr,
+            true,
+            kFallbackMaxExpansions);
+        const auto fallbackEnd = ProfileClock::now();
+        logProfileStageEnd(
+            "CoarseAStar fallback full search",
+            fallbackEnd - fallbackStart);
+        const std::size_t beforeFallbackCount = result.paths.size();
+        const bool fallbackProducedNoPath = fallbackResult.paths.empty();
+        const ::ErrorCode fallbackErrorCode = fallbackResult.error_code;
+        const ::PlannerStatus fallbackStatus = fallbackResult.status;
+        const std::string fallbackMessage = fallbackResult.message;
+        mergeFallbackPlanningPaths(
+            result,
+            std::move(fallbackResult),
+            requestedPathCount);
+        const std::size_t fallbackAddedPathCount =
+            result.paths.size() >= beforeFallbackCount
+                ? result.paths.size() - beforeFallbackCount
+                : 0U;
+        logProfileMessage(
+            "Fallback full search result: status=" +
+            std::to_string(static_cast<int>(fallbackStatus)) +
+            ", error_code=" +
+            std::to_string(static_cast<int>(fallbackErrorCode)) +
+            ", paths=" +
+            std::to_string(fallbackAddedPathCount) +
+            ", message=" + fallbackMessage);
+
+        // Do not leave the primary Hint search's stale 50k-expansion error
+        // in place when the fallback is the last completed search.
+        if (fallbackAddedPathCount != 0U) {
+            result.status = ::PlannerStatus::OK;
+            result.error_code = ::ErrorCode::NONE;
+            result.message = fallbackMessage.empty()
+                ? "Fallback full coarse search produced path(s)."
+                : fallbackMessage;
+        } else if (result.paths.empty()) {
+            result.status = fallbackStatus;
+            result.error_code = fallbackErrorCode;
+            result.message = fallbackMessage;
+        }
+
+        const bool fallbackNeedsEndpointResnap =
+            fallbackProducedNoPath ||
+            fallbackErrorCode == ::ErrorCode::START_POINT_BLOCKED ||
+            fallbackErrorCode == ::ErrorCode::END_POINT_BLOCKED ||
+            fallbackErrorCode == ::ErrorCode::COMPUTATION_LIMIT_EXCEEDED;
+        if (fallbackNeedsEndpointResnap) {
+            logProfileMessage(
+                "Fallback full search hit corridor rupture or endpoint block; retrying with "
+                "nearest free-space endpoint roots.");
+            const FallbackEndpointSnap fallbackStartRoot =
+                snapEndpointToFreeSpaceForFallback(
+                    map.impl_->grid,
+                    selectedPoseStart.point,
+                    constraint.start_tangent,
+                    map.impl_->poses,
+                    "start");
+            const FallbackEndpointSnap fallbackGoalRoot =
+                snapEndpointToFreeSpaceForFallback(
+                    map.impl_->grid,
+                    selectedPoseGoal.point,
+                    constraint.end_tangent,
+                    map.impl_->poses,
+                    "goal");
+            const ResolvedEndpoint snappedStart{
+                fallbackStartRoot.point,
+                fallbackStartRoot.poseId};
+            const ResolvedEndpoint snappedGoal{
+                fallbackGoalRoot.point,
+                fallbackGoalRoot.poseId};
+            ::PlanningResult snappedResult = runCoarseSearch(
+                snappedStart,
+                snappedGoal,
+                nullptr,
+                true,
+                kFallbackMaxExpansions);
+            const std::size_t snappedResultCount = snappedResult.paths.size();
+            if (snappedResultCount != 0U) {
+                selectedPoseStart = snappedStart;
+                selectedPoseGoal = snappedGoal;
+                result = std::move(snappedResult);
+                deduplicatePlanningPaths(result, requestedPathCount);
+                result.status = ::PlannerStatus::OK;
+                result.error_code = ::ErrorCode::NONE;
+                logProfileMessage(
+                    "Fallback endpoint re-snap succeeded; start=(" +
+                    std::to_string(selectedPoseStart.point.x) + ", " +
+                    std::to_string(selectedPoseStart.point.y) + ", " +
+                    std::to_string(selectedPoseStart.point.z) +
+                    "), goal=(" +
+                    std::to_string(selectedPoseGoal.point.x) + ", " +
+                    std::to_string(selectedPoseGoal.point.y) + ", " +
+                    std::to_string(selectedPoseGoal.point.z) +
+                    "), added_paths=" +
+                    std::to_string(result.paths.size()) +
+                    ", snapped_search_paths=" +
+                    std::to_string(snappedResultCount) + ".");
+            } else if (result.paths.empty()) {
+                result.status = snappedResult.status;
+                result.error_code = snappedResult.error_code;
+                result.message = snappedResult.message;
+                logProfileMessage(
+                    "Fallback endpoint re-snap failed: status=" +
+                    std::to_string(static_cast<int>(snappedResult.status)) +
+                    ", error_code=" +
+                    std::to_string(static_cast<int>(
+                        snappedResult.error_code)) +
+                    ", message=" + snappedResult.message);
+            }
+        }
+
+        logProfileMessage(
+            "CoarseAStar fallback added " +
+            std::to_string(fallbackAddedPathCount) +
+            " unique paths; total=" +
+            std::to_string(result.paths.size()) + "/" +
+            std::to_string(requestedPathCount));
+    }
+
     if (result.error_code == ::ErrorCode::PATH_NOT_FOUND) {
         return {PlanStatus::NO_PATH, {}};
     }
@@ -958,9 +1445,25 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         for (::PathResult& internalPath : result.paths) {
             if (internalPath.path.empty() ||
                 !(internalPath.path.front() == safeStart) ||
-                !(internalPath.path.back() == safeGoal)) {
+                (!internalPath.goal_tolerance_accepted &&
+                 !(internalPath.path.back() == safeGoal))) {
                 throw std::runtime_error(
                     "Internal path endpoints do not match shifted endpoints.");
+            }
+            if (internalPath.goal_tolerance_accepted) {
+                const Point3D& acceptedEndpoint = internalPath.path.back();
+                const double dx = static_cast<double>(
+                    acceptedEndpoint.x - safeGoal.x);
+                const double dy = static_cast<double>(
+                    acceptedEndpoint.y - safeGoal.y);
+                const double dz = static_cast<double>(
+                    acceptedEndpoint.z - safeGoal.z);
+                const double acceptedDistance = std::sqrt(
+                    dx * dx + dy * dy + dz * dz);
+                logProfileMessage(
+                    "Goal tolerance accepted at distance " +
+                    std::to_string(acceptedDistance) +
+                    "; returning nearest safe endpoint.");
             }
             PathResult path;
             path.path.reserve(
@@ -988,20 +1491,24 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 internalWaypointIndices[index] = path.path.size() - 1U;
             }
             const std::size_t safeGoalPathIndex = path.path.size() - 1U;
-            appendContinuous26(path.path, internalGoal);
+            if (!internalPath.goal_tolerance_accepted) {
+                appendContinuous26(path.path, internalGoal);
+            }
             path.cost = internalPath.cost +
                 pointDistance(internalStart, safeStart) +
-                pointDistance(safeGoal, internalGoal);
+                (internalPath.goal_tolerance_accepted
+                    ? 0.0
+                    : pointDistance(safeGoal, internalGoal));
             path.pose_description.reserve(path.path.size());
             std::vector<bool> described(path.path.size(), false);
             const Vector3D startNormal = unitPoseNormal(
-                map.impl_->poses[resolvedPoseStart.poseId]);
+                map.impl_->poses[selectedPoseStart.poseId]);
             const Vector3D startTangent = unitPoseTangent(
-                map.impl_->poses[resolvedPoseStart.poseId]);
+                map.impl_->poses[selectedPoseStart.poseId]);
             const Vector3D goalNormal = unitPoseNormal(
-                map.impl_->poses[resolvedPoseGoal.poseId]);
+                map.impl_->poses[selectedPoseGoal.poseId]);
             const Vector3D goalTangent = unitPoseTangent(
-                map.impl_->poses[resolvedPoseGoal.poseId]);
+                map.impl_->poses[selectedPoseGoal.poseId]);
             for (std::size_t index = 0U;
                  index <= safeStartPathIndex;
                  ++index) {

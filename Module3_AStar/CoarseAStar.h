@@ -43,7 +43,9 @@ public:
         Point3D rawStart,
         Point3D rawGoal,
         float endpointImmunityRadius,
-        const std::vector<Point3D>* topologyHint = nullptr) {
+        const std::vector<Point3D>* topologyHint = nullptr,
+        bool allowFullSearch = false,
+        std::size_t maxExpansionsOverride = 0U) {
         PlanningResult result;
         const int boundedMaxPaths = std::min(
             maxPaths,
@@ -169,7 +171,8 @@ public:
                 rawGoal,
                 endpointImmunityRadius,
                 topologyHint,
-                std::max(config.busbar_width * 2.0F, 30.0F));
+                std::max(config.busbar_width * 2.0F, 30.0F),
+                allowFullSearch);
         } catch (const std::bad_alloc&) {
             result.error_code = ErrorCode::MEMORY_ALLOCATION_FAILED;
             result.message =
@@ -182,6 +185,9 @@ public:
         int penaltyRetries = 0;
         int rejectedOverlapCandidates = 0;
         bool diversityRetryLimitReached = false;
+        bool goalToleranceAccepted = false;
+        float bestGoalToleranceDistance =
+            std::numeric_limits<float>::infinity();
         while (static_cast<int>(result.paths.size()) < boundedMaxPaths) {
             SearchOutcome outcome;
             try {
@@ -196,7 +202,8 @@ public:
                     penalties,
                     rawStart,
                     rawGoal,
-                    endpointImmunityRadius);
+                    endpointImmunityRadius,
+                    maxExpansionsOverride);
             } catch (const std::bad_alloc&) {
                 std::sort(
                     result.paths.begin(),
@@ -276,6 +283,12 @@ public:
                     break;
                 }
                 penaltyRetries = 0;
+                if (outcome.goalToleranceAccepted) {
+                    goalToleranceAccepted = true;
+                    bestGoalToleranceDistance = std::min(
+                        bestGoalToleranceDistance,
+                        outcome.closestGoalDistance);
+                }
                 result.paths.push_back(std::move(outcome.path));
                 if (static_cast<int>(result.paths.size()) <
                     boundedMaxPaths) {
@@ -331,6 +344,11 @@ public:
             result.message +=
                 " Stopped after exhausting diversity retries without "
                 "accepting an over-threshold path.";
+        }
+        if (goalToleranceAccepted) {
+            result.message +=
+                " Goal tolerance accepted at distance " +
+                std::to_string(bestGoalToleranceDistance) + ".";
         }
         if (pathLimitClamped) {
             result.message += " maxPaths was clamped to " +
@@ -561,6 +579,9 @@ private:
         std::uint32_t closestBackwardDistance =
             std::numeric_limits<std::uint32_t>::max();
         float bestGeneratedGoalAlignment = -1.0F;
+        std::uint64_t closestGoalStateKey = kNoParent;
+        float closestGoalCost = std::numeric_limits<float>::infinity();
+        bool goalToleranceAccepted = false;
     };
 
     struct BackwardDistanceField {
@@ -1022,7 +1043,8 @@ private:
         const Point3D& rawGoal,
         float endpointImmunityRadius,
         const std::vector<Point3D>* topologyHint,
-        float topologyHintTolerance) {
+        float topologyHintTolerance,
+        bool allowFullSearch) {
         if (map.voxelCount() >
             static_cast<std::size_t>(
                 std::numeric_limits<std::uint32_t>::max())) {
@@ -1071,7 +1093,8 @@ private:
 
         const auto withinTopologyCorridor =
             [&](std::size_t candidate) noexcept {
-                if (topologyHint == nullptr || topologyHint->empty() ||
+                if (allowFullSearch || topologyHint == nullptr ||
+                    topologyHint->empty() ||
                     candidate == startVoxel || candidate == goalVoxel) {
                     return true;
                 }
@@ -1163,6 +1186,21 @@ private:
             }
             frontier.swap(nextFrontier);
             ++nextDistance;
+        }
+        if (!allowFullSearch && topologyHint != nullptr &&
+            !topologyHint->empty() &&
+            field.distance(startVoxel) ==
+                BackwardDistanceField::kWideUnreachable) {
+            return buildBackwardDistanceField(
+                map,
+                startVoxel,
+                goalVoxel,
+                rawStart,
+                rawGoal,
+                endpointImmunityRadius,
+                nullptr,
+                topologyHintTolerance,
+                true);
         }
         return field;
     }
@@ -1403,7 +1441,8 @@ private:
         const CostPenaltyMap& penalties,
         const Point3D& rawStart,
         const Point3D& rawGoal,
-        float endpointImmunityRadius) {
+        float endpointImmunityRadius,
+        std::size_t maxExpansionsOverride) {
         SearchOutcome outcome;
         std::unordered_map<std::uint64_t, StateRecord> records;
         records.reserve(131072U);
@@ -1464,9 +1503,13 @@ private:
         std::vector<NeighborCandidate> candidates(maximumCandidateCount);
 
         std::size_t expansions = 0U;
-        const std::size_t maxExpansions = penalties.values.empty()
+        const std::size_t defaultMaxExpansions = penalties.values.empty()
             ? kMaxExpansionsPerPath
             : kMaxExpansionsPerPenalizedPath;
+        const std::size_t maxExpansions = maxExpansionsOverride == 0U
+            ? defaultMaxExpansions
+            : std::max(defaultMaxExpansions, maxExpansionsOverride);
+        constexpr float kGoalToleranceDistance = 5.0F;
         std::uint64_t bestGoalKey = kNoParent;
         float bestGoalCost = std::numeric_limits<float>::infinity();
         std::uint64_t coarseGoalKey = kNoParent;
@@ -1509,6 +1552,13 @@ private:
                 currentDx * currentDx +
                 currentDy * currentDy +
                 currentDz * currentDz));
+            if (currentGoalDistance < outcome.closestGoalDistance ||
+                (currentGoalDistance == outcome.closestGoalDistance &&
+                 current.g < outcome.closestGoalCost)) {
+                outcome.closestGoalDistance = currentGoalDistance;
+                outcome.closestGoalStateKey = current.stateKey;
+                outcome.closestGoalCost = current.g;
+            }
             outcome.closestGoalDistance = std::min(
                 outcome.closestGoalDistance,
                 currentGoalDistance);
@@ -1979,6 +2029,24 @@ private:
             return outcome;
         }
         if (expansions >= maxExpansions) {
+            if (outcome.closestGoalStateKey != kNoParent &&
+                outcome.closestGoalDistance <= kGoalToleranceDistance) {
+                reconstructPath(
+                    map,
+                    records,
+                    startKey,
+                    outcome.closestGoalStateKey,
+                    poses,
+                    actions,
+                    outcome);
+                if (!outcome.path.path.empty()) {
+                    outcome.path.cost = outcome.closestGoalCost;
+                    outcome.path.goal_tolerance_accepted = true;
+                    outcome.goalToleranceAccepted = true;
+                    outcome.error_code = ErrorCode::NONE;
+                    return outcome;
+                }
+            }
             outcome.error_code = ErrorCode::COMPUTATION_LIMIT_EXCEEDED;
         }
         outcome.expansions = expansions;
