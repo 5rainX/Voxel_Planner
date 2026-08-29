@@ -7,7 +7,6 @@
 #include <limits>
 #include <queue>
 #include <stdexcept>
-#include <unordered_map>
 #include <utility>
 
 namespace module3_astar {
@@ -61,10 +60,43 @@ struct OpenNodeCompare {
 constexpr std::size_t kNoIndex =
     std::numeric_limits<std::size_t>::max();
 
-struct StateRecord {
-    double g = std::numeric_limits<double>::infinity();
-    std::size_t parent = kNoIndex;
-    bool closed = false;
+/**
+ * @brief Dense position-only search records.
+ *
+ * JumpAStar has exactly one search state per voxel. Keeping the records in
+ * direct-addressed arrays removes hashing from the inner relaxation loop
+ * without changing the queue ordering or any search decision.
+ */
+struct FlatSearchRecords {
+    explicit FlatSearchRecords(std::size_t voxelCount)
+        : g(voxelCount),
+          parent(voxelCount),
+          closed(voxelCount, 0U) {
+#pragma omp parallel sections
+        {
+#pragma omp section
+            {
+                std::fill(
+                    g.begin(),
+                    g.end(),
+                    std::numeric_limits<double>::infinity());
+            }
+#pragma omp section
+            {
+                std::fill(parent.begin(), parent.end(), kNoIndex);
+            }
+        }
+    }
+
+    bool generated(std::size_t index) const noexcept {
+        return index < g.size() &&
+            g[index] != std::numeric_limits<double>::infinity();
+    }
+
+    std::vector<double> g;
+    std::vector<std::size_t> parent;
+    std::vector<std::uint8_t> closed;
+    std::size_t generatedCount = 0U;
 };
 
 constexpr int kMaxPathsPerRequest = 10;
@@ -206,14 +238,16 @@ std::vector<Point3D> runSearch(
         return makeSegmentPath(start, goal);
     }
 
-    std::unordered_map<std::size_t, StateRecord> records;
-    records.reserve(4096U);
+    FlatSearchRecords records(map.voxelCount());
     std::priority_queue<
         OpenNode,
         std::vector<OpenNode>,
         OpenNodeCompare> open;
 
-    records.emplace(startIndex, StateRecord{0.0, kNoIndex, false});
+    records.g[startIndex] = 0.0;
+    records.parent[startIndex] = kNoIndex;
+    records.closed[startIndex] = 0U;
+    records.generatedCount = 1U;
     open.push({startIndex, 0.0, distance(start, goal)});
 
     const auto relax = [&](std::size_t fromIndex,
@@ -226,8 +260,7 @@ std::vector<Point3D> runSearch(
             map.isRawObstacle(pointIndex(map, to))) {
             return;
         }
-        const auto fromRecord = records.find(fromIndex);
-        if (fromRecord == records.end()) {
+        if (!records.generated(fromIndex)) {
             return;
         }
         const std::size_t targetIndex = pointIndex(map, to);
@@ -235,22 +268,19 @@ std::vector<Point3D> runSearch(
             return;
         }
         const double tentative =
-            fromRecord->second.g +
+            records.g[fromIndex] +
             distance(pointFromIndex(map, fromIndex), to);
-        auto targetRecord = records.find(targetIndex);
-        if (targetRecord != records.end() &&
-            (targetRecord->second.closed ||
-             tentative + kScoreEpsilon >= targetRecord->second.g)) {
+        if (records.generated(targetIndex) &&
+            (records.closed[targetIndex] != 0U ||
+             tentative + kScoreEpsilon >= records.g[targetIndex])) {
             return;
         }
-        if (targetRecord == records.end()) {
-            targetRecord = records.emplace(
-                targetIndex,
-                StateRecord{}).first;
+        if (!records.generated(targetIndex)) {
+            ++records.generatedCount;
         }
-        targetRecord->second.g = tentative;
-        targetRecord->second.parent = fromIndex;
-        targetRecord->second.closed = false;
+        records.g[targetIndex] = tentative;
+        records.parent[targetIndex] = fromIndex;
+        records.closed[targetIndex] = 0U;
         queue.push({
             targetIndex,
             tentative,
@@ -260,13 +290,13 @@ std::vector<Point3D> runSearch(
     while (!open.empty()) {
         const OpenNode currentNode = open.top();
         open.pop();
-        const auto currentRecord = records.find(currentNode.index);
-        if (currentRecord == records.end() ||
-            currentRecord->second.closed ||
-            currentNode.g > currentRecord->second.g + kScoreEpsilon) {
+        if (!records.generated(currentNode.index) ||
+            records.closed[currentNode.index] != 0U ||
+            currentNode.g >
+                records.g[currentNode.index] + kScoreEpsilon) {
             continue;
         }
-        currentRecord->second.closed = true;
+        records.closed[currentNode.index] = 1U;
         if (currentNode.index == goalIndex) {
             break;
         }
@@ -293,25 +323,24 @@ std::vector<Point3D> runSearch(
         }
     }
 
-    const auto goalRecord = records.find(goalIndex);
-    if (goalRecord == records.end() || !goalRecord->second.closed) {
+    if (!records.generated(goalIndex) ||
+        records.closed[goalIndex] == 0U) {
         return {};
     }
 
     std::vector<std::size_t> reversed;
     std::size_t currentIndex = goalIndex;
     for (std::size_t hops = 0U;
-         currentIndex != kNoIndex && hops <= records.size();
+         currentIndex != kNoIndex && hops <= records.generatedCount;
          ++hops) {
         reversed.push_back(currentIndex);
         if (currentIndex == startIndex) {
             break;
         }
-        const auto record = records.find(currentIndex);
-        if (record == records.end()) {
+        if (!records.generated(currentIndex)) {
             return {};
         }
-        currentIndex = record->second.parent;
+        currentIndex = records.parent[currentIndex];
     }
     if (reversed.empty() || reversed.back() != startIndex) {
         return {};
