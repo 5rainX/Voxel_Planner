@@ -44,6 +44,14 @@ struct Vector3D {
 };
 
 /**
+ * @brief Requested terminal orientation for a planning endpoint.
+ */
+struct EndpointPose {
+    Vector3D normal{0.0, 0.0, 1.0};
+    Vector3D tangent{1.0, 0.0, 0.0};
+};
+
+/**
  * @brief Orientation information attached to a conditional waypoint.
  */
 struct PoseDescription {
@@ -109,7 +117,9 @@ private:
         const ProcessedMap& map,
         const Point3D& start,
         const Point3D& goal,
-        int max_paths);
+        int max_paths,
+        const EndpointPose& start_pose,
+        const EndpointPose& end_pose);
 };
 
 /**
@@ -144,5 +154,19 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     const Point3D& start,
     const Point3D& goal,
     int max_paths);
+
+/**
+ * @brief Finds routes using explicit start and goal endpoint orientations.
+ *
+ * The requested normal and tangent are mapped to the nearest generated pose
+ * that is collision-free at the resolved endpoint voxel.
+ */
+std::pair<PlanStatus, std::vector<PathResult>> findPaths(
+    const ProcessedMap& map,
+    const Point3D& start,
+    const Point3D& goal,
+    int max_paths,
+    const EndpointPose& start_pose,
+    const EndpointPose& end_pose);
 
 } // namespace voxel_planner

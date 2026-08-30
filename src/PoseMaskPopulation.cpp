@@ -72,6 +72,8 @@ void PoseMaskPopulator::populate(
     grid.lazyPoseFootprints_ =
         std::make_shared<const CachedPoseFootprints>(cachedFootprints);
     grid.lazyPoseFootprintBounds_.resize(cachedFootprints.size());
+    voxel_planner::VoxelOffsetBounds unconditionalBounds{};
+    bool unconditionalBoundsInitialized = false;
     for (std::size_t poseId = 0U;
          poseId < cachedFootprints.size();
          ++poseId) {
@@ -91,7 +93,33 @@ void PoseMaskPopulator::populate(
         }
         bounds.valid = true;
         grid.lazyPoseFootprintBounds_[poseId] = bounds;
+
+        if (!unconditionalBoundsInitialized) {
+            unconditionalBounds = bounds;
+            unconditionalBoundsInitialized = true;
+        } else {
+            unconditionalBounds.minDx = std::min(
+                unconditionalBounds.minDx,
+                bounds.minDx);
+            unconditionalBounds.maxDx = std::max(
+                unconditionalBounds.maxDx,
+                bounds.maxDx);
+            unconditionalBounds.minDy = std::min(
+                unconditionalBounds.minDy,
+                bounds.minDy);
+            unconditionalBounds.maxDy = std::max(
+                unconditionalBounds.maxDy,
+                bounds.maxDy);
+            unconditionalBounds.minDz = std::min(
+                unconditionalBounds.minDz,
+                bounds.minDz);
+            unconditionalBounds.maxDz = std::max(
+                unconditionalBounds.maxDz,
+                bounds.maxDz);
+        }
     }
+    unconditionalBounds.valid = unconditionalBoundsInitialized;
+    grid.unconditionalPoseFootprintBounds_ = unconditionalBounds;
 }
 
 } // namespace module2_morphology

@@ -23,6 +23,14 @@ public:
         Point3D goal,
         int maxPaths);
 
+    static std::vector<std::vector<Point3D>> findPaths(
+        const VoxelGrid& map,
+        Point3D start,
+        Point3D goal,
+        int maxPaths,
+        const voxel_planner::EndpointPose& startPose,
+        const voxel_planner::EndpointPose& endPose);
+
     static std::vector<Point3D> findPath(
         const VoxelGrid& map,
         Point3D start,

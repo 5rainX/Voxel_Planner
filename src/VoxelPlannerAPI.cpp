@@ -59,6 +59,8 @@ bool hasPositiveConfiguration(
            config.busbar_width > 0.0F &&
            std::isfinite(config.busbar_thickness) &&
            config.busbar_thickness > 0.0F &&
+           std::isfinite(config.twist_factor) &&
+           config.twist_factor > 0.0F &&
            std::isfinite(config.flat_bend_factor) &&
            config.flat_bend_factor > 0.0F &&
            std::isfinite(config.vertical_bend_factor) &&
@@ -85,17 +87,34 @@ bool isUnitVector(const voxel_planner::Vector3D& vector) {
     return std::abs(length - 1.0) <= 1e-6;
 }
 
+bool areOrthogonal(
+    const voxel_planner::Vector3D& lhs,
+    const voxel_planner::Vector3D& rhs) {
+    return std::abs(
+        lhs.x * rhs.x +
+        lhs.y * rhs.y +
+        lhs.z * rhs.z) <= 1e-6;
+}
+
 void validateEndpointConstraint(
     const voxel_planner::EndpointConstraint& constraint) {
-    if (!isUnitVector(constraint.start_tangent) ||
+    if (!isUnitVector(constraint.start_normal) ||
+        !isUnitVector(constraint.start_tangent) ||
+        !areOrthogonal(
+            constraint.start_normal,
+            constraint.start_tangent) ||
+        !isUnitVector(constraint.end_normal) ||
         !isUnitVector(constraint.end_tangent) ||
+        !areOrthogonal(
+            constraint.end_normal,
+            constraint.end_tangent) ||
         !std::isfinite(constraint.min_begin_length) ||
         !std::isfinite(constraint.min_end_length) ||
         constraint.min_begin_length < 0.0F ||
         constraint.min_end_length < 0.0F) {
         throw std::invalid_argument(
-            "Endpoint tangents must be unit vectors and terminal lengths "
-            "must be finite and non-negative.");
+            "Endpoint normals and tangents must be unit, orthogonal vectors; "
+            "terminal lengths must be finite and non-negative.");
     }
 }
 
@@ -600,6 +619,7 @@ void appendPublicConditionalPose(
 std::uint32_t findNearestAllowedEndpointPose(
     const VoxelGrid& grid,
     const voxel_planner::Point3D& point,
+    const voxel_planner::Vector3D& requestedNormal,
     const voxel_planner::Vector3D& requestedTangent,
     const std::vector<voxel_planner::BusbarPose>& poses,
     bool requireCollisionFree = true) {
@@ -609,26 +629,25 @@ std::uint32_t findNearestAllowedEndpointPose(
         static_cast<std::uint32_t>(point.y),
         static_cast<std::uint32_t>(point.z));
 
+    auto poseAlignment = [&](const voxel_planner::BusbarPose& pose) {
+        const voxel_planner::Vector3D normal = unitPoseNormal(pose);
+        const voxel_planner::Vector3D tangent = unitPoseTangent(pose);
+        return requestedNormal.x * normal.x +
+            requestedNormal.y * normal.y +
+            requestedNormal.z * normal.z +
+            requestedTangent.x * tangent.x +
+            requestedTangent.y * tangent.y +
+            requestedTangent.z * tangent.z;
+    };
+
     double bestAlignment = -std::numeric_limits<double>::infinity();
     for (const voxel_planner::BusbarPose& pose : poses) {
-        const double tangentLength = std::sqrt(static_cast<double>(
-            pose.tx * pose.tx + pose.ty * pose.ty + pose.tz * pose.tz));
-        const double alignment =
-            (requestedTangent.x * pose.tx +
-             requestedTangent.y * pose.ty +
-             requestedTangent.z * pose.tz) /
-            tangentLength;
+        const double alignment = poseAlignment(pose);
         bestAlignment = std::max(bestAlignment, alignment);
     }
 
     for (const voxel_planner::BusbarPose& pose : poses) {
-        const double tangentLength = std::sqrt(static_cast<double>(
-            pose.tx * pose.tx + pose.ty * pose.ty + pose.tz * pose.tz));
-        const double alignment =
-            (requestedTangent.x * pose.tx +
-             requestedTangent.y * pose.ty +
-             requestedTangent.z * pose.tz) /
-            tangentLength;
+        const double alignment = poseAlignment(pose);
         if (alignment + kAlignmentTolerance >= bestAlignment &&
             (!requireCollisionFree ||
              grid.isPoseAllowedForSearch(voxelIndex, pose.poseId))) {
@@ -652,13 +671,15 @@ struct FallbackEndpointSnap {
 ResolvedEndpoint resolveEndpointOutsideTerminal(
     const VoxelGrid& grid,
     const voxel_planner::Point3D& rawPoint,
+    const voxel_planner::Vector3D& normal,
     const voxel_planner::Vector3D& tangent,
     const voxel_planner::Vector3D& preferredRouteTangent,
     float minimumLength,
     int direction,
     const std::vector<voxel_planner::BusbarPose>& poses,
     const char* endpointName,
-    float immunityRadius) {
+    float immunityRadius,
+    bool allowAlternateTangents = true) {
     const voxel_planner::Point3D nominalPoint = shiftedEndpoint(
         rawPoint,
         tangent,
@@ -696,6 +717,7 @@ ResolvedEndpoint resolveEndpointOutsideTerminal(
                 const std::uint32_t poseId = findNearestAllowedEndpointPose(
                     grid,
                     candidate,
+                    normal,
                     searchTangent,
                     poses,
                     true);
@@ -711,49 +733,51 @@ ResolvedEndpoint resolveEndpointOutsideTerminal(
         return resolved;
     }
 
-    struct RankedTangent {
-        voxel_planner::Vector3D tangent{};
-        double alignment = -1.0;
-    };
-    std::vector<RankedTangent> fallbackTangents;
-    fallbackTangents.reserve(26U);
-    for (int z = -1; z <= 1; ++z) {
-        for (int y = -1; y <= 1; ++y) {
-            for (int x = -1; x <= 1; ++x) {
-                if (x == 0 && y == 0 && z == 0) {
-                    continue;
+    if (allowAlternateTangents) {
+        struct RankedTangent {
+            voxel_planner::Vector3D tangent{};
+            double alignment = -1.0;
+        };
+        std::vector<RankedTangent> fallbackTangents;
+        fallbackTangents.reserve(26U);
+        for (int z = -1; z <= 1; ++z) {
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    if (x == 0 && y == 0 && z == 0) {
+                        continue;
+                    }
+                    const double length = std::sqrt(static_cast<double>(
+                        x * x + y * y + z * z));
+                    voxel_planner::Vector3D candidateTangent{
+                        x / length,
+                        y / length,
+                        z / length};
+                    const double requestedAlignment =
+                        candidateTangent.x * tangent.x +
+                        candidateTangent.y * tangent.y +
+                        candidateTangent.z * tangent.z;
+                    if (requestedAlignment > 1.0 - 1e-9) {
+                        continue;
+                    }
+                    fallbackTangents.push_back({
+                        candidateTangent,
+                        candidateTangent.x * preferredRouteTangent.x +
+                            candidateTangent.y * preferredRouteTangent.y +
+                            candidateTangent.z * preferredRouteTangent.z});
                 }
-                const double length = std::sqrt(static_cast<double>(
-                    x * x + y * y + z * z));
-                voxel_planner::Vector3D candidateTangent{
-                    x / length,
-                    y / length,
-                    z / length};
-                const double requestedAlignment =
-                    candidateTangent.x * tangent.x +
-                    candidateTangent.y * tangent.y +
-                    candidateTangent.z * tangent.z;
-                if (requestedAlignment > 1.0 - 1e-9) {
-                    continue;
-                }
-                fallbackTangents.push_back({
-                    candidateTangent,
-                    candidateTangent.x * preferredRouteTangent.x +
-                        candidateTangent.y * preferredRouteTangent.y +
-                        candidateTangent.z * preferredRouteTangent.z});
             }
         }
-    }
-    std::sort(
-        fallbackTangents.begin(),
-        fallbackTangents.end(),
-        [](const RankedTangent& lhs, const RankedTangent& rhs) {
-            return lhs.alignment > rhs.alignment;
-        });
-    for (const RankedTangent& fallback : fallbackTangents) {
-        resolved = findAlongTangent(fallback.tangent);
-        if (resolved.poseId != std::numeric_limits<std::uint32_t>::max()) {
-            return resolved;
+        std::sort(
+            fallbackTangents.begin(),
+            fallbackTangents.end(),
+            [](const RankedTangent& lhs, const RankedTangent& rhs) {
+                return lhs.alignment > rhs.alignment;
+            });
+        for (const RankedTangent& fallback : fallbackTangents) {
+            resolved = findAlongTangent(fallback.tangent);
+            if (resolved.poseId != std::numeric_limits<std::uint32_t>::max()) {
+                return resolved;
+            }
         }
     }
 
@@ -769,9 +793,10 @@ ResolvedEndpoint resolveEndpointOutsideTerminal(
         const std::uint32_t poseId = findNearestAllowedEndpointPose(
             grid,
             nominalPoint,
+            normal,
             tangent,
             poses,
-            false);
+            true);
         if (poseId != std::numeric_limits<std::uint32_t>::max()) {
             return {nominalPoint, poseId};
         }
@@ -785,6 +810,7 @@ ResolvedEndpoint resolveEndpointOutsideTerminal(
 FallbackEndpointSnap snapEndpointToFreeSpaceForFallback(
     const VoxelGrid& grid,
     const voxel_planner::Point3D& seed,
+    const voxel_planner::Vector3D& requestedNormal,
     const voxel_planner::Vector3D& requestedTangent,
     const std::vector<voxel_planner::BusbarPose>& poses,
     const char* endpointName) {
@@ -816,6 +842,7 @@ FallbackEndpointSnap snapEndpointToFreeSpaceForFallback(
             const std::uint32_t poseId = findNearestAllowedEndpointPose(
                 grid,
                 candidate,
+                requestedNormal,
                 requestedTangent,
                 poses,
                 true);
@@ -1010,6 +1037,22 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     const Point3D& start,
     const Point3D& goal,
     int max_paths) {
+    return findPaths(
+        map,
+        start,
+        goal,
+        max_paths,
+        EndpointPose{},
+        EndpointPose{});
+}
+
+std::pair<PlanStatus, std::vector<PathResult>> findPaths(
+    const ProcessedMap& map,
+    const Point3D& start,
+    const Point3D& goal,
+    int max_paths,
+    const EndpointPose& start_pose,
+    const EndpointPose& end_pose) {
     if (!map.impl_) {
         throw std::invalid_argument(
             "ProcessedMap is empty or has been moved from.");
@@ -1017,7 +1060,11 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     if (max_paths <= 0) {
         throw std::invalid_argument("max_paths must be positive.");
     }
-    const EndpointConstraint constraint;
+    EndpointConstraint constraint;
+    constraint.start_normal = start_pose.normal;
+    constraint.start_tangent = start_pose.tangent;
+    constraint.end_normal = end_pose.normal;
+    constraint.end_tangent = end_pose.tangent;
     validateEndpointConstraint(constraint);
     constexpr float kEndpointImmunityRadius = 15.0F;
     const Point3D internalStart =
@@ -1082,7 +1129,9 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
             map.impl_->jumpGrid,
             jumpSafeStart,
             jumpSafeGoal,
-            max_paths);
+            max_paths,
+            start_pose,
+            end_pose);
     const auto jumpEnd = ProfileClock::now();
     logProfileStageEnd("JumpAStar::findPaths", jumpEnd - jumpStart);
     logProfileMessage(
@@ -1187,6 +1236,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     const ResolvedEndpoint resolvedPoseStart = resolveEndpointOutsideTerminal(
         map.impl_->grid,
         internalStart,
+        constraint.start_normal,
         constraint.start_tangent,
         preferredRouteTangent,
         constraint.min_begin_length,
@@ -1197,6 +1247,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     const ResolvedEndpoint resolvedPoseGoal = resolveEndpointOutsideTerminal(
         map.impl_->grid,
         internalGoal,
+        constraint.end_normal,
         constraint.end_tangent,
         preferredRouteTangent,
         constraint.min_end_length,
@@ -1347,6 +1398,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 snapEndpointToFreeSpaceForFallback(
                     map.impl_->grid,
                     selectedPoseStart.point,
+                    constraint.start_normal,
                     constraint.start_tangent,
                     map.impl_->poses,
                     "start");
@@ -1354,6 +1406,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 snapEndpointToFreeSpaceForFallback(
                     map.impl_->grid,
                     selectedPoseGoal.point,
+                    constraint.end_normal,
                     constraint.end_tangent,
                     map.impl_->poses,
                     "goal");

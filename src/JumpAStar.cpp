@@ -518,6 +518,16 @@ std::vector<std::vector<Point3D>> JumpAStar::findPaths(
     return paths;
 }
 
+std::vector<std::vector<Point3D>> JumpAStar::findPaths(
+    const VoxelGrid& map,
+    Point3D start,
+    Point3D goal,
+    int maxPaths,
+    const voxel_planner::EndpointPose&,
+    const voxel_planner::EndpointPose&) {
+    return findPaths(map, start, goal, maxPaths);
+}
+
 std::vector<Point3D> JumpAStar::findPath(
     const VoxelGrid& map,
     Point3D start,

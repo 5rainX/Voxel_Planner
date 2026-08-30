@@ -86,6 +86,7 @@ namespace voxel_planner {
 struct PlannerConfig {
     float busbar_width = 35.0F;
     float busbar_thickness = 5.0F;
+    float twist_factor = 1.5F;
     float flat_bend_factor = 1.5F;
     float vertical_bend_factor = 0.557143F;
     int angle_step_deg = 15;
@@ -95,7 +96,9 @@ struct PlannerConfig {
 
 /** @brief Private default terminal constraint used by the facade. */
 struct EndpointConstraint {
+    Vector3D start_normal{0.0, 0.0, 1.0};
     Vector3D start_tangent{1.0, 0.0, 0.0};
+    Vector3D end_normal{0.0, 0.0, 1.0};
     Vector3D end_tangent{1.0, 0.0, 0.0};
     float min_begin_length = 0.0F;
     float min_end_length = 0.0F;
@@ -418,6 +421,7 @@ struct VoxelGrid {
         prefixWidth_ = 0U;
         prefixHeight_ = 0U;
         prefixDepth_ = 0U;
+        unconditionalPoseFootprintBounds_ = {};
         mask_evaluated_[linearIndex] = false;
         all_poses_allowed_[linearIndex] = false;
     }
@@ -489,6 +493,7 @@ struct VoxelGrid {
         prefixWidth_ = 0U;
         prefixHeight_ = 0U;
         prefixDepth_ = 0U;
+        unconditionalPoseFootprintBounds_ = {};
 
         rebuildOccupancyBlocks();
     }
@@ -572,6 +577,7 @@ private:
         lazyPoseFootprints_;
     std::vector<voxel_planner::VoxelOffsetBounds>
         lazyPoseFootprintBounds_;
+    voxel_planner::VoxelOffsetBounds unconditionalPoseFootprintBounds_;
 
     std::size_t occupancyBlockIndex(
         std::uint32_t bx,
@@ -654,6 +660,18 @@ private:
         const std::size_t planeIndex = linearIndex % plane;
         const int anchorY = static_cast<int>(planeIndex / width_);
         const int anchorX = static_cast<int>(planeIndex % width_);
+
+        if (unconditionalPoseFootprintBounds_.valid &&
+            isObstacleFreeBox(
+                anchorX,
+                anchorY,
+                anchorZ,
+                unconditionalPoseFootprintBounds_)) {
+            all_poses_allowed_[linearIndex] = true;
+            mask_evaluated_[linearIndex] = true;
+            return;
+        }
+
         std::vector<std::uint64_t> localMask(
             poseMaskWordCount_,
             0U);

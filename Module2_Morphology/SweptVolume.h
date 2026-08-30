@@ -31,6 +31,7 @@ std::vector<VoxelOffset> generateTwistSweep(
     const BusbarPose& poseStart,
     const BusbarPose& poseEnd,
     const PlannerConfig& config,
-    float twistAngleRadians);
+    float twistAngleRadians,
+    float twistTravelLength);
 
 } // namespace voxel_planner

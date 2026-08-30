@@ -94,33 +94,6 @@ std::vector<std::uint64_t> buildPrefixSum(
     return prefix;
 }
 
-std::uint64_t boxSum(
-    const std::vector<std::uint64_t>& prefix,
-    int x1,
-    int x2,
-    int y1,
-    int y2,
-    int z1,
-    int z2,
-    std::uint32_t prefixWidth,
-    std::uint32_t prefixHeight) {
-    const std::uint32_t minX = static_cast<std::uint32_t>(x1);
-    const std::uint32_t maxX = static_cast<std::uint32_t>(x2 + 1);
-    const std::uint32_t minY = static_cast<std::uint32_t>(y1);
-    const std::uint32_t maxY = static_cast<std::uint32_t>(y2 + 1);
-    const std::uint32_t minZ = static_cast<std::uint32_t>(z1);
-    const std::uint32_t maxZ = static_cast<std::uint32_t>(z2 + 1);
-
-    return prefix[index(maxX, maxY, maxZ, prefixWidth, prefixHeight)] -
-           prefix[index(minX, maxY, maxZ, prefixWidth, prefixHeight)] -
-           prefix[index(maxX, minY, maxZ, prefixWidth, prefixHeight)] -
-           prefix[index(maxX, maxY, minZ, prefixWidth, prefixHeight)] +
-           prefix[index(minX, minY, maxZ, prefixWidth, prefixHeight)] +
-           prefix[index(minX, maxY, minZ, prefixWidth, prefixHeight)] +
-           prefix[index(maxX, minY, minZ, prefixWidth, prefixHeight)] -
-           prefix[index(minX, minY, minZ, prefixWidth, prefixHeight)];
-}
-
 bool prefixDimensionsAreValid(
     const std::vector<std::uint64_t>& prefix,
     std::uint32_t prefixWidth,
@@ -147,20 +120,6 @@ std::uint32_t expandedDimension(std::uint32_t source, int pad) {
     return static_cast<std::uint32_t>(expanded);
 }
 
-struct KernelAxisBounds {
-    int minOffset = 0;
-    int maxOffset = 0;
-};
-
-KernelAxisBounds kernelAxisBounds(int kernelSize) noexcept {
-    // For an even-sized discrete kernel, use exactly kernelSize cells:
-    // [-kernelSize / 2, kernelSize - kernelSize / 2 - 1].
-    const int minOffset = kernelSize / 2;
-    return {
-        -minOffset,
-        kernelSize - minOffset - 1};
-}
-
 } // namespace
 
 MorphologyResult VoxelMorphologyEngine::buildCoarseBlockedMap(
@@ -173,9 +132,6 @@ MorphologyResult VoxelMorphologyEngine::buildCoarseBlockedMap(
     const int padX = kernel.x / 2;
     const int padY = kernel.y / 2;
     const int padZ = kernel.z / 2;
-    const KernelAxisBounds xBounds = kernelAxisBounds(kernel.x);
-    const KernelAxisBounds yBounds = kernelAxisBounds(kernel.y);
-    const KernelAxisBounds zBounds = kernelAxisBounds(kernel.z);
     const std::uint32_t expandedWidth =
         expandedDimension(rawGrid.width(), padX);
     const std::uint32_t expandedHeight =
@@ -204,61 +160,12 @@ MorphologyResult VoxelMorphologyEngine::buildCoarseBlockedMap(
         }
     }
 
-    const std::vector<std::uint64_t> expandedPrefix = buildPrefixSum(
+    // The morphology engine now preserves only the raw obstacles in the
+    // padded map. Pose classification is deferred to the pose-mask cache,
+    // which can query this prefix sum in O(1) when checking conditional
+    // footprints and unconditional clearance.
+    std::vector<std::uint64_t> rawPrefix = buildPrefixSum(
         expanded,
-        expandedWidth,
-        expandedHeight,
-        expandedDepth);
-
-    std::vector<std::uint8_t> coarse = expanded;
-    for (std::uint32_t z = 0U; z < expandedDepth; ++z) {
-        for (std::uint32_t y = 0U; y < expandedHeight; ++y) {
-            for (std::uint32_t x = 0U; x < expandedWidth; ++x) {
-                const std::size_t linear =
-                    index(x, y, z, expandedWidth, expandedHeight);
-                if (coarse[linear] == VoxelGrid::kRawObstacleValue) {
-                    continue;
-                }
-
-                const int x1 = std::max<int>(
-                    0,
-                    static_cast<int>(x) + xBounds.minOffset);
-                const int x2 = std::min<int>(
-                    static_cast<int>(expandedWidth) - 1,
-                    static_cast<int>(x) + xBounds.maxOffset);
-                const int y1 = std::max<int>(
-                    0,
-                    static_cast<int>(y) + yBounds.minOffset);
-                const int y2 = std::min<int>(
-                    static_cast<int>(expandedHeight) - 1,
-                    static_cast<int>(y) + yBounds.maxOffset);
-                const int z1 = std::max<int>(
-                    0,
-                    static_cast<int>(z) + zBounds.minOffset);
-                const int z2 = std::min<int>(
-                    static_cast<int>(expandedDepth) - 1,
-                    static_cast<int>(z) + zBounds.maxOffset);
-
-                if (boxSum(
-                        expandedPrefix,
-                        x1,
-                        x2,
-                        y1,
-                        y2,
-                        z1,
-                        z2,
-                        expandedWidth + 1U,
-                        expandedHeight + 1U) > 0U) {
-                    coarse[linear] = VoxelGrid::kRawObstacleValue;
-                }
-            }
-        }
-    }
-
-    // Dynamic queries must describe the final coarse map, including cells
-    // newly blocked by the morphology pass.
-    std::vector<std::uint64_t> coarsePrefix = buildPrefixSum(
-        coarse,
         expandedWidth,
         expandedHeight,
         expandedDepth);
@@ -268,12 +175,12 @@ MorphologyResult VoxelMorphologyEngine::buildCoarseBlockedMap(
         expandedWidth,
         expandedHeight,
         expandedDepth,
-        std::move(coarse));
+        std::move(expanded));
 
     return {
         std::move(result),
         voxel_planner::Point3D{padX, padY, padZ},
-        std::move(coarsePrefix),
+        std::move(rawPrefix),
         expandedWidth + 1U,
         expandedHeight + 1U,
         expandedDepth + 1U};
@@ -315,18 +222,38 @@ bool VoxelMorphologyEngine::isBoxCollisionFree(
         static_cast<std::int64_t>(prefixHeight) - 1;
     const std::int64_t mapDepth =
         static_cast<std::int64_t>(prefixDepth) - 1;
-    if (minX < 0 || minY < 0 || minZ < 0 ||
-        maxX >= mapWidth || maxY >= mapHeight || maxZ >= mapDepth ||
-        minX > maxX || minY > maxY || minZ > maxZ) {
+    if (minX > maxX || minY > maxY || minZ > maxZ ||
+        mapWidth <= 0 || mapHeight <= 0 || mapDepth <= 0) {
         return false;
     }
 
-    const std::uint32_t x1 = static_cast<std::uint32_t>(minX);
-    const std::uint32_t x2 = static_cast<std::uint32_t>(maxX + 1);
-    const std::uint32_t y1 = static_cast<std::uint32_t>(minY);
-    const std::uint32_t y2 = static_cast<std::uint32_t>(maxY + 1);
-    const std::uint32_t z1 = static_cast<std::uint32_t>(minZ);
-    const std::uint32_t z2 = static_cast<std::uint32_t>(maxZ + 1);
+    const std::int64_t clampedMinX = std::max<std::int64_t>(0, minX);
+    const std::int64_t clampedMinY = std::max<std::int64_t>(0, minY);
+    const std::int64_t clampedMinZ = std::max<std::int64_t>(0, minZ);
+    const std::int64_t clampedMaxX = std::min<std::int64_t>(
+        mapWidth - 1,
+        maxX);
+    const std::int64_t clampedMaxY = std::min<std::int64_t>(
+        mapHeight - 1,
+        maxY);
+    const std::int64_t clampedMaxZ = std::min<std::int64_t>(
+        mapDepth - 1,
+        maxZ);
+    if (clampedMinX > clampedMaxX ||
+        clampedMinY > clampedMaxY ||
+        clampedMinZ > clampedMaxZ) {
+        return false;
+    }
+    const bool trimmed = clampedMinX != minX || clampedMinY != minY ||
+        clampedMinZ != minZ || clampedMaxX != maxX ||
+        clampedMaxY != maxY || clampedMaxZ != maxZ;
+
+    const std::uint32_t x1 = static_cast<std::uint32_t>(clampedMinX);
+    const std::uint32_t x2 = static_cast<std::uint32_t>(clampedMaxX + 1);
+    const std::uint32_t y1 = static_cast<std::uint32_t>(clampedMinY);
+    const std::uint32_t y2 = static_cast<std::uint32_t>(clampedMaxY + 1);
+    const std::uint32_t z1 = static_cast<std::uint32_t>(clampedMinZ);
+    const std::uint32_t z2 = static_cast<std::uint32_t>(clampedMaxZ + 1);
 
     const auto at = [
         &prefix,
@@ -349,7 +276,7 @@ bool VoxelMorphologyEngine::isBoxCollisionFree(
         at(x1, y2, z1) +
         at(x2, y1, z1) -
         at(x1, y1, z1);
-    return sum == 0U;
+    return !trimmed && sum == 0U;
 }
 
 } // namespace module2_morphology

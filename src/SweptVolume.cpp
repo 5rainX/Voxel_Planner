@@ -345,13 +345,15 @@ std::vector<VoxelOffset> generateTwistSweep(
     const BusbarPose& pose_start,
     const BusbarPose& pose_end,
     const PlannerConfig& config,
-    float twist_angle_radians) {
+    float twist_angle_radians,
+    float twist_travel_length) {
     validateDimensions(config);
     if (std::abs(twist_angle_radians) <= kVectorTolerance ||
         std::abs(twist_angle_radians) >
-            3.14159265358979323846F) {
+            3.14159265358979323846F ||
+        twist_travel_length <= 0.0F) {
         throw std::invalid_argument(
-            "Twist angle magnitude must be in (0, pi].");
+            "Twist angle magnitude must be in (0, pi] and travel length must be positive.");
     }
 
     const Vector tangent = makeUnit(
@@ -391,19 +393,22 @@ std::vector<VoxelOffset> generateTwistSweep(
     const int sampleCount = std::max(
         1,
         static_cast<int>(std::ceil(
-            std::abs(static_cast<double>(twist_angle_radians)) *
-            crossSectionRadius / kMaximumSurfaceStep)));
+            (static_cast<double>(twist_travel_length) +
+             std::abs(static_cast<double>(twist_angle_radians)) *
+             crossSectionRadius) / kMaximumSurfaceStep)));
 
     std::set<std::tuple<int, int, int>> uniqueOffsets;
     for (int sample = 0; sample <= sampleCount; ++sample) {
         const double angle =
             static_cast<double>(twist_angle_radians) * sample / sampleCount;
+        const double travel =
+            static_cast<double>(twist_travel_length) * sample / sampleCount;
         const Vector normal = normalized(rotateAroundAxis(
             startNormal,
             tangent,
             angle));
         addCrossSection(
-            {0.0, 0.0, 0.0},
+            {tangent.x * travel, tangent.y * travel, tangent.z * travel},
             tangent,
             normal,
             config,
