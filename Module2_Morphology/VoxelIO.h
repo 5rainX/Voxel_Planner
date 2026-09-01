@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cctype>
 #include <charconv>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -37,6 +38,200 @@ public:
             return loadAsciiVtk(inputPath);
         }
         return loadTextVoxelMap(inputPath);
+    }
+
+    /**
+     * @brief Builds a position-only obstacle map for JumpAStar.
+     *
+     * This is deliberately a separate grid. The input grid, which is later
+     * used by CoarseAStar for exact pose-aware collision checks, is never
+     * modified. A separable 3D Chebyshev dilation gives the same result as
+     * visiting every obstacle's cubic neighborhood while reducing the work
+     * to three linear passes over the voxel volume.
+     */
+    static VoxelGrid buildSafetyDilatedGrid(
+        const VoxelGrid& source,
+        int radius) {
+        if (radius < 0) {
+            throw std::invalid_argument(
+                "Safety dilation radius must be non-negative.");
+        }
+
+        VoxelGrid result(
+            source.width_,
+            source.height_,
+            source.depth_);
+        std::vector<std::uint8_t> stageA(source.storage_.size(), 0U);
+        std::vector<std::uint8_t> stageB(source.storage_.size(), 0U);
+        for (std::size_t index = 0U;
+             index < source.storage_.size();
+             ++index) {
+            stageA[index] =
+                source.storage_[index] == VoxelGrid::kRawObstacleValue
+                    ? 1U
+                    : 0U;
+        }
+
+        const auto dilateX = [&](
+            const std::vector<std::uint8_t>& input,
+            std::vector<std::uint8_t>& output) {
+            const std::int64_t lineCount =
+                static_cast<std::int64_t>(source.depth_) *
+                source.height_;
+#pragma omp parallel for schedule(static) if(lineCount > 1024)
+            for (std::int64_t line = 0;
+                 line < lineCount;
+                 ++line) {
+                const std::uint32_t z = static_cast<std::uint32_t>(
+                    line / source.height_);
+                const std::uint32_t y = static_cast<std::uint32_t>(
+                    line % source.height_);
+                int active = 0;
+                const std::uint64_t initialEnd = std::min(
+                    static_cast<std::uint64_t>(source.width_),
+                    static_cast<std::uint64_t>(radius) + 1U);
+                for (std::uint64_t initialX = 0U;
+                     initialX < initialEnd;
+                     ++initialX) {
+                    active += input[source.index(
+                        static_cast<std::uint32_t>(initialX),
+                        y,
+                        z)];
+                }
+                for (std::uint32_t x = 0U;
+                     x < source.width_;
+                     ++x) {
+                    const std::uint64_t addX =
+                        static_cast<std::uint64_t>(x) +
+                        static_cast<std::uint64_t>(radius) + 1U;
+                    if (addX < source.width_) {
+                        active += input[source.index(
+                            static_cast<std::uint32_t>(addX),
+                            y,
+                            z)];
+                    }
+                    if (static_cast<std::uint64_t>(x) >=
+                        static_cast<std::uint64_t>(radius)) {
+                        const std::uint32_t removeX =
+                            x - static_cast<std::uint32_t>(radius);
+                        active -= input[source.index(removeX, y, z)];
+                    }
+                    output[source.index(x, y, z)] =
+                        active > 0 ? 1U : 0U;
+                }
+            }
+        };
+
+        const auto dilateY = [&](
+            const std::vector<std::uint8_t>& input,
+            std::vector<std::uint8_t>& output) {
+            const std::int64_t lineCount =
+                static_cast<std::int64_t>(source.depth_) *
+                source.width_;
+#pragma omp parallel for schedule(static) if(lineCount > 1024)
+            for (std::int64_t line = 0;
+                 line < lineCount;
+                 ++line) {
+                const std::uint32_t z = static_cast<std::uint32_t>(
+                    line / source.width_);
+                const std::uint32_t x = static_cast<std::uint32_t>(
+                    line % source.width_);
+                int active = 0;
+                const std::uint64_t initialEnd = std::min(
+                    static_cast<std::uint64_t>(source.height_),
+                    static_cast<std::uint64_t>(radius) + 1U);
+                for (std::uint64_t initialY = 0U;
+                     initialY < initialEnd;
+                     ++initialY) {
+                    active += input[source.index(
+                        x,
+                        static_cast<std::uint32_t>(initialY),
+                        z)];
+                }
+                for (std::uint32_t y = 0U;
+                     y < source.height_;
+                     ++y) {
+                    const std::uint64_t addY =
+                        static_cast<std::uint64_t>(y) +
+                        static_cast<std::uint64_t>(radius) + 1U;
+                    if (addY < source.height_) {
+                        active += input[source.index(
+                            x,
+                            static_cast<std::uint32_t>(addY),
+                            z)];
+                    }
+                    if (static_cast<std::uint64_t>(y) >=
+                        static_cast<std::uint64_t>(radius)) {
+                        const std::uint32_t removeY =
+                            y - static_cast<std::uint32_t>(radius);
+                        active -= input[source.index(x, removeY, z)];
+                    }
+                    output[source.index(x, y, z)] =
+                        active > 0 ? 1U : 0U;
+                }
+            }
+        };
+
+        const auto dilateZ = [&](
+            const std::vector<std::uint8_t>& input,
+            std::vector<std::uint8_t>& output) {
+            const std::int64_t lineCount =
+                static_cast<std::int64_t>(source.height_) *
+                source.width_;
+#pragma omp parallel for schedule(static) if(lineCount > 1024)
+            for (std::int64_t line = 0;
+                 line < lineCount;
+                 ++line) {
+                const std::uint32_t y = static_cast<std::uint32_t>(
+                    line / source.width_);
+                const std::uint32_t x = static_cast<std::uint32_t>(
+                    line % source.width_);
+                int active = 0;
+                const std::uint64_t initialEnd = std::min(
+                    static_cast<std::uint64_t>(source.depth_),
+                    static_cast<std::uint64_t>(radius) + 1U);
+                for (std::uint64_t initialZ = 0U;
+                     initialZ < initialEnd;
+                     ++initialZ) {
+                    active += input[source.index(
+                        x,
+                        y,
+                        static_cast<std::uint32_t>(initialZ))];
+                }
+                for (std::uint32_t z = 0U;
+                     z < source.depth_;
+                     ++z) {
+                    const std::uint64_t addZ =
+                        static_cast<std::uint64_t>(z) +
+                        static_cast<std::uint64_t>(radius) + 1U;
+                    if (addZ < source.depth_) {
+                        active += input[source.index(
+                            x,
+                            y,
+                            static_cast<std::uint32_t>(addZ))];
+                    }
+                    if (static_cast<std::uint64_t>(z) >=
+                        static_cast<std::uint64_t>(radius)) {
+                        const std::uint32_t removeZ =
+                            z - static_cast<std::uint32_t>(radius);
+                        active -= input[source.index(x, y, removeZ)];
+                    }
+                    output[source.index(x, y, z)] =
+                        active > 0 ? 1U : 0U;
+                }
+            }
+        };
+
+        dilateX(stageA, stageB);
+        stageA.swap(stageB);
+        dilateY(stageA, stageB);
+        stageA.swap(stageB);
+        dilateZ(stageA, result.storage_);
+        for (std::uint8_t& value : result.storage_) {
+            value = value != 0U ? VoxelGrid::kRawObstacleValue : 0U;
+        }
+        result.rebuildOccupancyBlocks();
+        return result;
     }
 
     static void exportDilatedMapToVtk(
@@ -234,21 +429,31 @@ private:
                     "Failed to map text voxel map into memory.");
             }
 #else
-            std::ifstream in(inputPath, std::ios::binary | std::ios::ate);
-            if (!in.is_open()) {
+            file_ = std::fopen(inputPath.c_str(), "rb");
+            if (file_ == nullptr) {
                 throw std::runtime_error(
                     "Failed to open text voxel map: " + inputPath);
             }
-            const std::streampos endPosition = in.tellg();
-            if (endPosition <= 0) {
+            if (std::fseek(file_, 0L, SEEK_END) != 0) {
+                closeFile();
+                throw std::runtime_error(
+                    "Failed to determine text voxel map size.");
+            }
+            const long endPosition = std::ftell(file_);
+            if (endPosition <= 0 ||
+                std::fseek(file_, 0L, SEEK_SET) != 0) {
+                closeFile();
                 throw std::runtime_error(
                     "Failed to determine text voxel map size.");
             }
             fallback_.resize(static_cast<std::size_t>(endPosition));
-            in.seekg(0, std::ios::beg);
-            in.read(fallback_.data(),
-                    static_cast<std::streamsize>(fallback_.size()));
-            if (!in) {
+            const std::size_t bytesRead = std::fread(
+                fallback_.data(),
+                1U,
+                fallback_.size(),
+                file_);
+            if (bytesRead != fallback_.size()) {
+                closeFile();
                 throw std::runtime_error(
                     "Failed to read text voxel map: " + inputPath);
             }
@@ -260,6 +465,8 @@ private:
         ~MappedTextFile() {
 #ifdef _WIN32
             closeHandles();
+#else
+            closeFile();
 #endif
         }
 
@@ -288,6 +495,15 @@ private:
 
         HANDLE file_ = INVALID_HANDLE_VALUE;
         HANDLE mapping_ = nullptr;
+#else
+        void closeFile() noexcept {
+            if (file_ != nullptr) {
+                std::fclose(file_);
+                file_ = nullptr;
+            }
+        }
+
+        std::FILE* file_ = nullptr;
 #endif
         const char* view_ = nullptr;
         std::size_t size_ = 0;
@@ -337,12 +553,30 @@ private:
             return false;
         }
 
-        int parsed = 0;
+        const std::uint64_t positiveLimit = static_cast<std::uint64_t>(
+            std::numeric_limits<int>::max());
+        const std::uint64_t negativeLimit = positiveLimit + 1U;
+        const std::uint64_t limit =
+            sign < 0 ? negativeLimit : positiveLimit;
+        std::uint64_t parsed = 0U;
         while (cursor < end && *cursor >= '0' && *cursor <= '9') {
-            parsed = parsed * 10 + (*cursor - '0');
+            const std::uint64_t digit =
+                static_cast<std::uint64_t>(*cursor - '0');
+            if (parsed > (limit - digit) / 10U) {
+                return false;
+            }
+            parsed = parsed * 10U + digit;
             ++cursor;
         }
-        value = sign * parsed;
+        if (sign < 0) {
+            if (parsed == negativeLimit) {
+                value = std::numeric_limits<int>::min();
+            } else {
+                value = -static_cast<int>(parsed);
+            }
+        } else {
+            value = static_cast<int>(parsed);
+        }
         return true;
     }
 
@@ -361,31 +595,37 @@ private:
     }
 
     static VoxelGrid loadTextVoxelMap(const std::string& inputPath) {
-        std::ifstream input(inputPath);
-        if (!input.is_open()) {
-            throw std::runtime_error(
-                "Failed to open text voxel map: " + inputPath);
-        }
-
-        std::string headerLine;
-        if (!std::getline(input, headerLine)) {
+        const MappedTextFile input(inputPath);
+        const char* const data = input.data();
+        const char* const end = data + input.size();
+        if (data == nullptr || data >= end) {
             throw std::runtime_error("Text voxel map is empty.");
         }
-        if (headerLine.size() >= 3U &&
-            static_cast<unsigned char>(headerLine[0]) == 0xEFU &&
-            static_cast<unsigned char>(headerLine[1]) == 0xBBU &&
-            static_cast<unsigned char>(headerLine[2]) == 0xBFU) {
-            headerLine.erase(0U, 3U);
+
+        const char* headerEnd = static_cast<const char*>(
+            std::memchr(data, '\n', input.size()));
+        if (headerEnd == nullptr) {
+            headerEnd = end;
         }
 
         // Both "map: x y z" and "header x y z" are accepted. The first
         // token is a descriptive prefix; only the three dimensions matter.
-        std::stringstream header(headerLine);
-        std::string prefix;
+        const char* headerCursor = data;
+        if (static_cast<std::size_t>(end - headerCursor) >= 3U &&
+            static_cast<unsigned char>(headerCursor[0]) == 0xEFU &&
+            static_cast<unsigned char>(headerCursor[1]) == 0xBBU &&
+            static_cast<unsigned char>(headerCursor[2]) == 0xBFU) {
+            headerCursor += 3;
+        }
+        const std::string_view prefix =
+            parseToken(headerCursor, headerEnd);
         int width = 0;
         int height = 0;
         int depth = 0;
-        if (!(header >> prefix >> width >> height >> depth)) {
+        if (prefix.empty() ||
+            !parseInteger(headerCursor, headerEnd, width) ||
+            !parseInteger(headerCursor, headerEnd, height) ||
+            !parseInteger(headerCursor, headerEnd, depth)) {
             throw std::runtime_error(
                 "Expected map dimensions after the header prefix.");
         }
@@ -398,26 +638,41 @@ private:
             static_cast<std::uint32_t>(height),
             static_cast<std::uint32_t>(depth));
 
-        std::string line;
-        while (std::getline(input, line)) {
-            std::stringstream record(line);
+        const char* cursor = headerEnd;
+        if (cursor < end) {
+            ++cursor;
+        }
+        while (cursor < end) {
+            const char* lineEnd = static_cast<const char*>(
+                std::memchr(
+                    cursor,
+                    '\n',
+                    static_cast<std::size_t>(end - cursor)));
+            if (lineEnd == nullptr) {
+                lineEnd = end;
+            }
+
+            const char* recordCursor = cursor;
             int x = 0;
             int y = 0;
             int z = 0;
-            if (!(record >> x >> y >> z)) {
-                continue;
-            }
-            if (!grid.isValid(x, y, z)) {
-                continue;
+            if (parseInteger(recordCursor, lineEnd, x) &&
+                parseInteger(recordCursor, lineEnd, y) &&
+                parseInteger(recordCursor, lineEnd, z) &&
+                grid.isValid(x, y, z)) {
+                // Sparse text records are occupancy declarations. Any
+                // trailing value is metadata and does not affect occupancy.
+                grid.storage_[grid.index(
+                    static_cast<std::uint32_t>(x),
+                    static_cast<std::uint32_t>(y),
+                    static_cast<std::uint32_t>(z))] =
+                    VoxelGrid::kRawObstacleValue;
             }
 
-            // Sparse text records are occupancy declarations. Any trailing
-            // value is metadata and must not affect occupancy.
-            grid.storage_[grid.index(
-                static_cast<std::uint32_t>(x),
-                static_cast<std::uint32_t>(y),
-                static_cast<std::uint32_t>(z))] =
-                VoxelGrid::kRawObstacleValue;
+            cursor = lineEnd;
+            if (cursor < end) {
+                ++cursor;
+            }
         }
         grid.rebuildOccupancyBlocks();
         return grid;

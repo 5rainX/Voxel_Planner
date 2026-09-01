@@ -136,7 +136,7 @@ struct VoxelOffsetBounds {
 } // namespace voxel_planner
 
 /**
- * @brief Dense raw occupancy with sparse, lazily evaluated pose masks.
+ * @brief Dense raw occupancy with sparse, precomputed pose masks.
  *
  * The storage is flattened with X as the fastest-changing dimension:
  * index = x + y * width + z * width * height.
@@ -164,7 +164,6 @@ struct VoxelGrid {
               static_cast<std::size_t>(occupancyBlockWidth_) *
                   occupancyBlockHeight_ * occupancyBlockDepth_,
               0U),
-          mask_evaluated_(storage_.size(), false),
           all_poses_allowed_(storage_.size(), false) {}
 
     std::uint32_t width() const noexcept { return width_; }
@@ -192,7 +191,6 @@ struct VoxelGrid {
             return 0U;
         }
 
-        ensurePoseMaskEvaluated(linearIndex);
         if (storage_[linearIndex] == kRawObstacleValue ||
             storage_[linearIndex] == kBlockedStorageValue) {
             return 0U;
@@ -333,46 +331,14 @@ struct VoxelGrid {
 
     /**
      * Read-only single-pose fast path used by parallel A* expansion.
-     * Unlike isPoseAllowed(), this does not populate the sparse JIT cache.
+     *
+     * Pose masks are populated before a ProcessedMap becomes visible to
+     * search, so this query performs no cache allocation or mutation.
      */
     bool isPoseAllowedForSearch(
         std::size_t linearIndex,
         std::uint32_t poseId) const {
-        if (linearIndex >= storage_.size() ||
-            poseId >= poseCount_ ||
-            !lazyPoseFootprints_ ||
-            isObstacle(linearIndex)) {
-            return false;
-        }
-
-        const std::size_t plane =
-            static_cast<std::size_t>(width_) * height_;
-        const int anchorZ = static_cast<int>(linearIndex / plane);
-        const std::size_t planeIndex = linearIndex % plane;
-        const int anchorY = static_cast<int>(planeIndex / width_);
-        const int anchorX = static_cast<int>(planeIndex % width_);
-        if (poseId < lazyPoseFootprintBounds_.size() &&
-            isObstacleFreeBox(
-                anchorX,
-                anchorY,
-                anchorZ,
-                lazyPoseFootprintBounds_[poseId])) {
-            return true;
-        }
-        for (const voxel_planner::VoxelOffset& offset :
-             (*lazyPoseFootprints_)[poseId]) {
-            const int x = anchorX + offset.dx;
-            const int y = anchorY + offset.dy;
-            const int z = anchorZ + offset.dz;
-            if (!isValid(x, y, z) ||
-                isObstacle(index(
-                    static_cast<std::uint32_t>(x),
-                    static_cast<std::uint32_t>(y),
-                    static_cast<std::uint32_t>(z)))) {
-                return false;
-            }
-        }
-        return true;
+        return isPoseAllowed(linearIndex, poseId);
     }
 
     std::size_t allowedPoseCount(std::size_t linearIndex) const {
@@ -421,9 +387,6 @@ struct VoxelGrid {
         prefixWidth_ = 0U;
         prefixHeight_ = 0U;
         prefixDepth_ = 0U;
-        unconditionalPoseFootprintBounds_ = {};
-        mask_evaluated_[linearIndex] = false;
-        all_poses_allowed_[linearIndex] = false;
     }
 
     void attachMorphologyPrefix(
@@ -481,20 +444,15 @@ struct VoxelGrid {
                 occupancyBlockHeight_ * occupancyBlockDepth_,
             0U);
 
-        mask_evaluated_.assign(storage_.size(), false);
         all_poses_allowed_.assign(storage_.size(), false);
         poseMaskSlots_.clear();
         allowedPoseMask_.clear();
         allPoseMask_.clear();
-        lazyPoseFootprints_.reset();
-        lazyPoseFootprintBounds_.clear();
         poseMaskWordCount_ = 0U;
         morphologyPrefix_.reset();
         prefixWidth_ = 0U;
         prefixHeight_ = 0U;
         prefixDepth_ = 0U;
-        unconditionalPoseFootprintBounds_ = {};
-
         rebuildOccupancyBlocks();
     }
 
@@ -539,7 +497,6 @@ struct VoxelGrid {
             return VoxelState::UNCONDITIONAL;
         }
 
-        ensurePoseMaskEvaluated(linearIndex);
         if (all_poses_allowed_[linearIndex]) {
             return VoxelState::UNCONDITIONAL;
         }
@@ -564,20 +521,13 @@ private:
     std::size_t poseCount_ = 0U;
     std::size_t poseMaskWordCount_ = 0U;
     std::vector<std::uint64_t> allPoseMask_;
-    mutable std::vector<bool> mask_evaluated_;
-    mutable std::vector<bool> all_poses_allowed_;
-    mutable std::unordered_map<std::size_t, std::uint32_t> poseMaskSlots_;
-    mutable std::vector<std::uint64_t> allowedPoseMask_;
+    std::vector<bool> all_poses_allowed_;
+    std::unordered_map<std::size_t, std::uint32_t> poseMaskSlots_;
+    std::vector<std::uint64_t> allowedPoseMask_;
     std::shared_ptr<const std::vector<std::uint64_t>> morphologyPrefix_;
     std::uint32_t prefixWidth_ = 0U;
     std::uint32_t prefixHeight_ = 0U;
     std::uint32_t prefixDepth_ = 0U;
-    std::shared_ptr<
-        const std::vector<std::vector<voxel_planner::VoxelOffset>>>
-        lazyPoseFootprints_;
-    std::vector<voxel_planner::VoxelOffsetBounds>
-        lazyPoseFootprintBounds_;
-    voxel_planner::VoxelOffsetBounds unconditionalPoseFootprintBounds_;
 
     std::size_t occupancyBlockIndex(
         std::uint32_t bx,
@@ -641,107 +591,6 @@ private:
                  occupancyBlockHeight_));
             rebuildOccupancyBlock(bx, by, bz);
         }
-    }
-
-    void ensurePoseMaskEvaluated(std::size_t linearIndex) const {
-        if (poseCount_ == 0U || mask_evaluated_[linearIndex]) {
-            return;
-        }
-        if (storage_[linearIndex] == kRawObstacleValue ||
-            storage_[linearIndex] == kBlockedStorageValue ||
-            !lazyPoseFootprints_) {
-            mask_evaluated_[linearIndex] = true;
-            return;
-        }
-
-        const std::size_t plane =
-            static_cast<std::size_t>(width_) * height_;
-        const int anchorZ = static_cast<int>(linearIndex / plane);
-        const std::size_t planeIndex = linearIndex % plane;
-        const int anchorY = static_cast<int>(planeIndex / width_);
-        const int anchorX = static_cast<int>(planeIndex % width_);
-
-        if (unconditionalPoseFootprintBounds_.valid &&
-            isObstacleFreeBox(
-                anchorX,
-                anchorY,
-                anchorZ,
-                unconditionalPoseFootprintBounds_)) {
-            all_poses_allowed_[linearIndex] = true;
-            mask_evaluated_[linearIndex] = true;
-            return;
-        }
-
-        std::vector<std::uint64_t> localMask(
-            poseMaskWordCount_,
-            0U);
-        std::size_t validPoseCount = 0U;
-
-        for (std::size_t poseId = 0U;
-             poseId < lazyPoseFootprints_->size();
-             ++poseId) {
-            bool collides = false;
-            if (poseId < lazyPoseFootprintBounds_.size() &&
-                isObstacleFreeBox(
-                    anchorX,
-                    anchorY,
-                    anchorZ,
-                    lazyPoseFootprintBounds_[poseId])) {
-                localMask[poseId / 64U] |=
-                    std::uint64_t{1} << (poseId % 64U);
-                ++validPoseCount;
-                continue;
-            }
-            for (const voxel_planner::VoxelOffset& offset :
-                 (*lazyPoseFootprints_)[poseId]) {
-                const int x = anchorX + offset.dx;
-                const int y = anchorY + offset.dy;
-                const int z = anchorZ + offset.dz;
-                if (!isValid(x, y, z)) {
-                    collides = true;
-                    break;
-                }
-                const std::uint8_t occupied = storage_[index(
-                    static_cast<std::uint32_t>(x),
-                    static_cast<std::uint32_t>(y),
-                    static_cast<std::uint32_t>(z))];
-                if (occupied == kRawObstacleValue ||
-                    occupied == kBlockedStorageValue) {
-                    collides = true;
-                    break;
-                }
-            }
-            if (!collides) {
-                localMask[poseId / 64U] |=
-                    std::uint64_t{1} << (poseId % 64U);
-                ++validPoseCount;
-            }
-        }
-
-        if (validPoseCount == poseCount_) {
-            all_poses_allowed_[linearIndex] = true;
-        } else if (validPoseCount != 0U) {
-            const std::size_t slot =
-                allowedPoseMask_.size() / poseMaskWordCount_;
-            if (slot > std::numeric_limits<std::uint32_t>::max()) {
-                throw std::overflow_error(
-                    "Too many lazily evaluated conditional pose masks.");
-            }
-            const std::size_t previousSize = allowedPoseMask_.size();
-            allowedPoseMask_.insert(
-                allowedPoseMask_.end(),
-                localMask.begin(),
-                localMask.end());
-            try {
-                poseMaskSlots_.emplace(
-                    linearIndex,
-                    static_cast<std::uint32_t>(slot));
-            } catch (...) {
-                allowedPoseMask_.resize(previousSize);
-                throw;
-            }
-        }
-        mask_evaluated_[linearIndex] = true;
     }
 
     friend class module2_morphology::VoxelIO;

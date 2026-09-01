@@ -160,10 +160,9 @@ MorphologyResult VoxelMorphologyEngine::buildCoarseBlockedMap(
         }
     }
 
-    // The morphology engine now preserves only the raw obstacles in the
-    // padded map. Pose classification is deferred to the pose-mask cache,
-    // which can query this prefix sum in O(1) when checking conditional
-    // footprints and unconditional clearance.
+    // The morphology engine preserves only raw obstacles in the padded map.
+    // PoseMaskPopulator consumes this prefix sum immediately after loading
+    // to precompute all static pose classifications.
     std::vector<std::uint64_t> rawPrefix = buildPrefixSum(
         expanded,
         expandedWidth,

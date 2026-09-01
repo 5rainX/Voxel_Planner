@@ -18,10 +18,10 @@ CachedPoseFootprints precomputePoseFootprints(
     const voxel_planner::PlannerConfig& config);
 
 /**
- * @brief Installs the footprint table for lazy static-pose evaluation.
+ * @brief Precomputes and installs static pose masks for the complete grid.
  *
- * This function does not traverse the grid. Each voxel is classified when
- * isPoseAllowed() or getState() first requests its mask.
+ * The returned VoxelGrid owns immutable-after-load mask storage. Queries
+ * during search only read the packed masks and never allocate or mutate them.
  */
 void populateVoxelPoseMasks(
     VoxelGrid& grid,

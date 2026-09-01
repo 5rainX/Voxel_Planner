@@ -13,7 +13,6 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
-#include <mutex>
 #include <queue>
 #include <new>
 #include <stdexcept>
@@ -182,6 +181,24 @@ void appendContinuous26(
         next.z += stepToward(next.z, target.z);
         path.push_back(next);
     }
+}
+
+void prependContinuous26(
+    std::vector<voxel_planner::Point3D>& path,
+    const voxel_planner::Point3D& target) {
+    if (path.empty()) {
+        path.push_back(target);
+        return;
+    }
+    if (path.front() == target) {
+        return;
+    }
+
+    std::vector<voxel_planner::Point3D> prefix;
+    appendContinuous26(prefix, target);
+    appendContinuous26(prefix, path.front());
+    prefix.pop_back();
+    path.insert(path.begin(), prefix.begin(), prefix.end());
 }
 
 voxel_planner::Point3D addOffset(
@@ -919,30 +936,6 @@ struct ProcessedMap::Impl {
     std::uint32_t prefixWidth = 0U;
     std::uint32_t prefixHeight = 0U;
     std::uint32_t prefixDepth = 0U;
-    bool poseDataAugmented = false;
-    std::mutex poseDataMutex;
-
-    void ensurePoseDataAugmented() {
-        if (poseDataAugmented) {
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(poseDataMutex);
-        if (poseDataAugmented) {
-            return;
-        }
-
-        poses = generateDiscretePoses(config);
-        const module2_morphology::CachedPoseFootprints footprints =
-            module2_morphology::precomputePoseFootprints(
-                poses,
-                config);
-        module2_morphology::populateVoxelPoseMasks(
-            grid,
-            poses,
-            footprints);
-        poseDataAugmented = true;
-    }
 };
 
 ProcessedMap::ProcessedMap(std::shared_ptr<Impl> impl) noexcept
@@ -959,7 +952,6 @@ void ProcessedMap::exportVoxelClassificationToVtk(
     if (filename.empty()) {
         throw std::invalid_argument("VTK output filename must not be empty.");
     }
-    impl_->ensurePoseDataAugmented();
     module2_morphology::VoxelIO::exportVoxelClassificationToVtk(
         impl_->grid,
         filename);
@@ -974,7 +966,6 @@ void ProcessedMap::exportVoxelClassificationAndPosesToVtk(
     if (filename.empty()) {
         throw std::invalid_argument("VTK output filename must not be empty.");
     }
-    impl_->ensurePoseDataAugmented();
     module2_morphology::VoxelIO::
         exportVoxelClassificationAndPosesToVtk(
             impl_->grid,
@@ -1005,7 +996,18 @@ ProcessedMap loadMap(
 
     auto impl = std::make_shared<ProcessedMap::Impl>();
     VoxelGrid rawGrid = module2_morphology::VoxelIO::loadVoxelMap(filepath);
-    impl->jumpGrid = rawGrid;
+    const double safeRadiusValue = std::ceil(
+        static_cast<double>(thickness) / 2.0);
+    if (safeRadiusValue >
+        static_cast<double>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument(
+            "Busbar thickness is too large for safety dilation.");
+    }
+    const int safeRadius = static_cast<int>(safeRadiusValue);
+    impl->jumpGrid =
+        module2_morphology::VoxelIO::buildSafetyDilatedGrid(
+            rawGrid,
+            safeRadius);
     const int kernelWidth = static_cast<int>(std::ceil(width));
     const int kernelThickness = static_cast<int>(std::ceil(thickness));
     module2_morphology::MorphologyResult morphology =
@@ -1029,6 +1031,15 @@ ProcessedMap loadMap(
         impl->prefixHeight,
         impl->prefixDepth);
     impl->config = config;
+    impl->poses = generateDiscretePoses(impl->config);
+    const module2_morphology::CachedPoseFootprints footprints =
+        module2_morphology::precomputePoseFootprints(
+            impl->poses,
+            impl->config);
+    module2_morphology::populateVoxelPoseMasks(
+        impl->grid,
+        impl->poses,
+        footprints);
     return ProcessedMap(std::move(impl));
 }
 
@@ -1214,8 +1225,6 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
             "] points=" +
             std::to_string(topologyHintsInternal[index].size()));
     }
-
-    map.impl_->ensurePoseDataAugmented();
 
     logProfileStageBegin("SE3 endpoint resolution");
     const auto endpointResolutionStart = ProfileClock::now();
@@ -1531,7 +1540,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                         std::abs(internalGoal.x - safeGoal.x),
                         std::abs(internalGoal.y - safeGoal.y),
                         std::abs(internalGoal.z - safeGoal.z)})));
-            appendContinuous26(path.path, internalStart);
+            prependContinuous26(path.path, internalStart);
             appendContinuous26(path.path, safeStart);
             const std::size_t safeStartPathIndex = path.path.size() - 1U;
             std::vector<std::size_t> internalWaypointIndices(
@@ -1544,14 +1553,13 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 internalWaypointIndices[index] = path.path.size() - 1U;
             }
             const std::size_t safeGoalPathIndex = path.path.size() - 1U;
-            if (!internalPath.goal_tolerance_accepted) {
+            const Point3D& internalPathEndpoint = internalPath.path.back();
+            if (!(internalPathEndpoint == internalGoal)) {
                 appendContinuous26(path.path, internalGoal);
             }
             path.cost = internalPath.cost +
                 pointDistance(internalStart, safeStart) +
-                (internalPath.goal_tolerance_accepted
-                    ? 0.0
-                    : pointDistance(safeGoal, internalGoal));
+                pointDistance(internalPathEndpoint, internalGoal);
             path.pose_description.reserve(path.path.size());
             std::vector<bool> described(path.path.size(), false);
             const Vector3D startNormal = unitPoseNormal(
@@ -1605,6 +1613,14 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
             translatePathToPublicCoordinates(
                 path.path,
                 map.impl_->morphologyOffset);
+            if (!path.path.empty()) {
+                // The construction above already creates 26-connected
+                // bridges from the requested endpoints to their safe search
+                // roots. Keep the public contract explicit after translating
+                // back from the expanded morphology grid.
+                path.path.front() = start;
+                path.path.back() = goal;
+            }
             paths.push_back(std::move(path));
         }
         std::sort(

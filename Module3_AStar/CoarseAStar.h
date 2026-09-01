@@ -28,6 +28,8 @@ namespace module3_astar {
  * by the cached physical swept-volume template.
  */
 class CoarseAStar {
+    struct PoseLut;
+
 public:
     static PlanningResult findPaths(
         const VoxelGrid& map,
@@ -69,6 +71,23 @@ public:
                 "Pose table does not match the populated voxel pose masks.";
             return result;
         }
+
+        PoseLut poseLut;
+        try {
+            poseLut = buildPoseLut(
+                poses,
+                config.angle_step_deg);
+        } catch (const std::bad_alloc&) {
+            result.error_code = ErrorCode::MEMORY_ALLOCATION_FAILED;
+            result.message =
+                "Memory allocation failed while building pose LUTs.";
+            return result;
+        } catch (const std::exception& error) {
+            result.error_code = ErrorCode::INVALID_ARGUMENT;
+            result.message = error.what();
+            return result;
+        }
+
         if (!map.isValid(
                 startPose.position.x,
                 startPose.position.y,
@@ -171,8 +190,15 @@ public:
             endPose.poseId,
             poses.size());
 
+        const float topologyHintTolerance =
+            std::max(config.busbar_width * 2.0F, 30.0F);
+        HintDistanceLut hintLut;
         BackwardDistanceField backwardDistance;
         try {
+            hintLut = buildHintDistanceLut(
+                map,
+                topologyHint,
+                topologyHintTolerance);
             backwardDistance = buildBackwardDistanceField(
                 map,
                 startIndex,
@@ -180,8 +206,7 @@ public:
                 rawStart,
                 rawGoal,
                 endpointImmunityRadius,
-                topologyHint,
-                std::max(config.busbar_width * 2.0F, 30.0F),
+                hintLut,
                 allowFullSearch);
         } catch (const std::bad_alloc&) {
             result.error_code = ErrorCode::MEMORY_ALLOCATION_FAILED;
@@ -208,6 +233,7 @@ public:
                     goalKey,
                     poses,
                     actions,
+                    poseLut,
                     backwardDistance,
                     penalties,
                     rawStart,
@@ -424,6 +450,36 @@ private:
         int dz = 0;
     };
 
+    static constexpr std::size_t kDirectionCount = 26U;
+    static constexpr std::size_t kMaxDirectionalCandidates = 8U;
+    static constexpr std::size_t kMaxTransitionCandidates = 128U;
+
+    struct PoseCandidateList {
+        std::array<std::uint32_t, kMaxDirectionalCandidates> ids{};
+        std::size_t size = 0U;
+    };
+
+    struct PoseTransitionList {
+        std::array<std::uint32_t, kMaxTransitionCandidates> ids{};
+        std::size_t size = 0U;
+    };
+
+    /**
+     * @brief Immutable pose pruning tables built before the search starts.
+     *
+     * dir_to_poses contains the generated roll variants for each of the
+     * 26 exact tangent directions. directional_transition is the direct
+     * intersection of that table with pose_transition, so the hot path does
+     * not allocate or scan the complete pose pool.
+     */
+    struct PoseLut {
+        std::array<std::vector<std::uint32_t>, kDirectionCount>
+            dir_to_poses;
+        std::vector<PoseTransitionList> pose_transition;
+        std::vector<std::array<PoseCandidateList, kDirectionCount>>
+            directional_transition;
+    };
+
     struct ActionCatalog {
         std::vector<std::vector<std::vector<voxel_planner::VoxelOffset>>>
             straightSweeps;
@@ -446,6 +502,9 @@ private:
     static constexpr double kPi = 3.14159265358979323846;
     static constexpr float kCenterlineReusePenalty = 100000.0F;
     static constexpr float kNeighborReusePenalty = 1000.0F;
+    static constexpr double kMinTangentContinuity = 0.5;
+    static constexpr double kMinNormalContinuity = 0.95;
+    static constexpr int kMaxRollStepDistance = 2;
 
     struct Node {
         std::uint64_t stateKey = 0U;
@@ -508,6 +567,26 @@ private:
             return index < distances.size()
                 ? distances[index]
                 : kUnreachable;
+        }
+    };
+
+    /**
+     * @brief Per-request O(1) membership map for the topology hint band.
+     *
+     * A value of 0 denotes a voxel on the hint centerline. A value of 1
+     * denotes a voxel inside the configured hint tolerance. -1 means that
+     * the voxel is outside the hint band.
+     */
+    struct HintDistanceLut {
+        std::vector<std::int32_t> hint_distance_map;
+
+        bool enabled() const noexcept {
+            return !hint_distance_map.empty();
+        }
+
+        bool contains(std::size_t voxelIndex) const noexcept {
+            return voxelIndex < hint_distance_map.size() &&
+                hint_distance_map[voxelIndex] >= 0;
         }
     };
 
@@ -586,6 +665,121 @@ private:
         return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
     }
 
+    static bool poseTransitionIsAllowed(
+        const voxel_planner::BusbarPose& currentPose,
+        const voxel_planner::BusbarPose& candidatePose,
+        const Vector& currentTangent,
+        const Vector& currentNormal,
+        const Vector& candidateTangent,
+        const Vector& candidateNormal,
+        int rollStepDegrees) noexcept {
+        const int rollDifference = std::abs(
+            currentPose.roll_angle_deg - candidatePose.roll_angle_deg);
+        const int circularRollDifference = std::min(
+            rollDifference,
+            360 - rollDifference);
+        return dot(currentTangent, candidateTangent) >=
+                kMinTangentContinuity &&
+            dot(currentNormal, candidateNormal) >=
+                kMinNormalContinuity &&
+            circularRollDifference <=
+                kMaxRollStepDistance * rollStepDegrees;
+    }
+
+    static void appendPoseTransition(
+        PoseTransitionList& list,
+        std::uint32_t poseId) {
+        if (list.size >= list.ids.size()) {
+            throw std::overflow_error(
+                "Pose transition LUT candidate capacity exceeded.");
+        }
+        list.ids[list.size++] = poseId;
+    }
+
+    static void appendDirectionalCandidate(
+        PoseCandidateList& list,
+        std::uint32_t poseId) {
+        if (list.size >= list.ids.size()) {
+            throw std::overflow_error(
+                "Directional pose LUT candidate capacity exceeded.");
+        }
+        list.ids[list.size++] = poseId;
+    }
+
+    static PoseLut buildPoseLut(
+        const std::vector<voxel_planner::BusbarPose>& poses,
+        int rollStepDegrees) {
+        const int normalizedRollStepDegrees = std::max(1, rollStepDegrees);
+        PoseLut lut;
+        lut.pose_transition.resize(poses.size());
+        lut.directional_transition.resize(poses.size());
+
+        std::vector<Vector> tangents(poses.size());
+        std::vector<Vector> normals(poses.size());
+        std::vector<std::size_t> poseDirections(poses.size());
+        for (const voxel_planner::BusbarPose& pose : poses) {
+            if (pose.poseId >= poses.size()) {
+                throw std::invalid_argument(
+                    "Pose identifiers must be contiguous for LUT creation.");
+            }
+            const std::size_t direction = neighborIndex(
+                Delta{pose.tx, pose.ty, pose.tz});
+            if (neighborDeltas()[direction].dx != pose.tx ||
+                neighborDeltas()[direction].dy != pose.ty ||
+                neighborDeltas()[direction].dz != pose.tz) {
+                throw std::invalid_argument(
+                    "Pose tangent is not one of the 26 voxel directions.");
+            }
+            lut.dir_to_poses[direction].push_back(pose.poseId);
+            poseDirections[pose.poseId] = direction;
+            tangents[pose.poseId] = unitTangent(pose);
+            normals[pose.poseId] = unitNormal(pose);
+        }
+
+        for (std::size_t currentPoseId = 0U;
+             currentPoseId < poses.size();
+             ++currentPoseId) {
+            PoseTransitionList& transitions =
+                lut.pose_transition[currentPoseId];
+            for (std::size_t candidatePoseId = 0U;
+                 candidatePoseId < poses.size();
+                 ++candidatePoseId) {
+                if (poseTransitionIsAllowed(
+                        poses[currentPoseId],
+                        poses[candidatePoseId],
+                        tangents[currentPoseId],
+                        normals[currentPoseId],
+                        tangents[candidatePoseId],
+                        normals[candidatePoseId],
+                        normalizedRollStepDegrees)) {
+                    appendPoseTransition(
+                        transitions,
+                        static_cast<std::uint32_t>(candidatePoseId));
+                }
+            }
+
+            for (std::size_t direction = 0U;
+                 direction < kDirectionCount;
+                 ++direction) {
+                PoseCandidateList& candidates =
+                    lut.directional_transition[
+                        currentPoseId][direction];
+                for (std::size_t transitionIndex = 0U;
+                     transitionIndex < transitions.size;
+                     ++transitionIndex) {
+                    const std::uint32_t candidatePoseId =
+                        transitions.ids[transitionIndex];
+                    if (poseDirections[candidatePoseId] == direction) {
+                        appendDirectionalCandidate(
+                            candidates,
+                            candidatePoseId);
+                    }
+                }
+            }
+        }
+        return lut;
+    }
+
     static std::uint64_t stateKey(
         std::size_t voxelIndex,
         std::uint32_t poseId,
@@ -611,6 +805,68 @@ private:
         return {x, y, z};
     }
 
+    static HintDistanceLut buildHintDistanceLut(
+        const VoxelGrid& map,
+        const std::vector<Point3D>* topologyHint,
+        float topologyHintTolerance) {
+        HintDistanceLut lut;
+        if (topologyHint == nullptr ||
+            topologyHint->empty() ||
+            map.voxelCount() == 0U ||
+            !std::isfinite(topologyHintTolerance) ||
+            topologyHintTolerance < 0.0F) {
+            return lut;
+        }
+
+        lut.hint_distance_map.assign(
+            map.voxelCount(),
+            -1);
+        const double radius =
+            static_cast<double>(topologyHintTolerance);
+        const double radiusSquared = radius * radius;
+        const int radiusVoxels = static_cast<int>(std::ceil(radius));
+        for (const Point3D& hint : *topologyHint) {
+            if (!map.isValid(hint.x, hint.y, hint.z)) {
+                continue;
+            }
+            for (int dz = -radiusVoxels;
+                 dz <= radiusVoxels;
+                 ++dz) {
+                for (int dy = -radiusVoxels;
+                     dy <= radiusVoxels;
+                     ++dy) {
+                    for (int dx = -radiusVoxels;
+                         dx <= radiusVoxels;
+                         ++dx) {
+                        const double distanceSquared =
+                            static_cast<double>(dx) * dx +
+                            static_cast<double>(dy) * dy +
+                            static_cast<double>(dz) * dz;
+                        if (distanceSquared > radiusSquared) {
+                            continue;
+                        }
+                        const int x = hint.x + dx;
+                        const int y = hint.y + dy;
+                        const int z = hint.z + dz;
+                        if (!map.isValid(x, y, z)) {
+                            continue;
+                        }
+                        const std::size_t voxelIndex = map.index(
+                            static_cast<std::uint32_t>(x),
+                            static_cast<std::uint32_t>(y),
+                            static_cast<std::uint32_t>(z));
+                        if (dx == 0 && dy == 0 && dz == 0) {
+                            lut.hint_distance_map[voxelIndex] = 0;
+                        } else if (lut.hint_distance_map[voxelIndex] < 0) {
+                            lut.hint_distance_map[voxelIndex] = 1;
+                        }
+                    }
+                }
+            }
+        }
+        return lut;
+    }
+
     static bool poseTableMatchesMap(
         const VoxelGrid& map,
         const std::vector<voxel_planner::BusbarPose>& poses) {
@@ -626,22 +882,6 @@ private:
             seen[pose.poseId] = 1U;
         }
         return true;
-    }
-
-    static bool posesAreCompatible(
-        const std::vector<voxel_planner::BusbarPose>& poses,
-        std::uint32_t currentPoseId,
-        std::uint32_t requiredPoseId) {
-        if (currentPoseId >= poses.size() ||
-            requiredPoseId >= poses.size()) {
-            return false;
-        }
-        return dot(
-                   unitNormal(poses[currentPoseId]),
-                   unitNormal(poses[requiredPoseId])) > 0.5 &&
-            dot(
-                unitTangent(poses[currentPoseId]),
-                unitTangent(poses[requiredPoseId])) > 0.5;
     }
 
     static std::uint32_t firstAllowedPose(
@@ -830,8 +1070,7 @@ private:
         const Point3D& rawStart,
         const Point3D& rawGoal,
         float endpointImmunityRadius,
-        const std::vector<Point3D>* topologyHint,
-        float topologyHintTolerance,
+        const HintDistanceLut& hintLut,
         bool allowFullSearch) {
         BackwardDistanceField field;
         field.width = map.width();
@@ -845,9 +1084,6 @@ private:
         }
         const std::size_t plane =
             static_cast<std::size_t>(field.width) * field.height;
-        const double radius =
-            std::max(0.0, static_cast<double>(topologyHintTolerance));
-        const double radiusSquared = radius * radius;
         std::vector<std::size_t> frontier;
         frontier.push_back(goalVoxel);
         field.distances[goalVoxel] = 0U;
@@ -877,24 +1113,10 @@ private:
                         continue;
                     }
                     if (!allowFullSearch &&
-                        topologyHint != nullptr &&
-                        !topologyHint->empty() &&
+                        hintLut.enabled() &&
                         candidate != startVoxel &&
                         candidate != goalVoxel) {
-                        const Point3D candidatePoint =
-                            pointFromVoxelIndex(map, candidate);
-                        bool inside = false;
-                        for (const Point3D& hint : *topologyHint) {
-                            const double dx = candidatePoint.x - hint.x;
-                            const double dy = candidatePoint.y - hint.y;
-                            const double dz = candidatePoint.z - hint.z;
-                            if (dx * dx + dy * dy + dz * dz <=
-                                radiusSquared) {
-                                inside = true;
-                                break;
-                            }
-                        }
-                        if (!inside) {
+                        if (!hintLut.contains(candidate)) {
                             continue;
                         }
                     }
@@ -917,8 +1139,7 @@ private:
             frontier.swap(next);
         }
         if (!allowFullSearch &&
-            topologyHint != nullptr &&
-            !topologyHint->empty() &&
+            hintLut.enabled() &&
             field.distance(startVoxel) ==
                 BackwardDistanceField::kUnreachable) {
             return buildBackwardDistanceField(
@@ -928,8 +1149,7 @@ private:
                 rawStart,
                 rawGoal,
                 endpointImmunityRadius,
-                nullptr,
-                topologyHintTolerance,
+                hintLut,
                 true);
         }
         return field;
@@ -988,7 +1208,9 @@ private:
         const VoxelGrid& map,
         std::size_t targetVoxel,
         std::uint32_t currentPoseId,
-        const std::vector<voxel_planner::BusbarPose>& poses) {
+        const std::vector<voxel_planner::BusbarPose>& poses,
+        const Delta& movement,
+        const PoseLut& poseLut) {
         if (targetVoxel >= map.voxelCount() ||
             map.isObstacle(targetVoxel) ||
             currentPoseId >= poses.size()) {
@@ -998,21 +1220,28 @@ private:
             map.isPoseAllowedForSearch(targetVoxel, currentPoseId)) {
             return currentPoseId;
         }
+
+        const std::size_t direction = neighborIndex(movement);
+        const PoseCandidateList& candidates =
+            poseLut.directional_transition[currentPoseId][direction];
+        const Vector currentNormal = unitNormal(poses[currentPoseId]);
+        const Vector currentTangent = unitTangent(poses[currentPoseId]);
         double bestScore = -std::numeric_limits<double>::infinity();
         std::uint32_t selected = kInvalidPoseId;
-        for (std::uint32_t poseId = 0U;
-             poseId < poses.size();
-             ++poseId) {
-            if (!map.isPoseAllowedForSearch(targetVoxel, poseId) ||
-                !posesAreCompatible(poses, currentPoseId, poseId)) {
+        for (std::size_t index = 0U;
+             index < candidates.size;
+             ++index) {
+            const std::uint32_t poseId = candidates.ids[index];
+            if (poseId >= poses.size() ||
+                !map.isPoseAllowedForSearch(targetVoxel, poseId)) {
                 continue;
             }
             const double score =
                 dot(
-                    unitNormal(poses[currentPoseId]),
+                    currentNormal,
                     unitNormal(poses[poseId])) +
                 dot(
-                    unitTangent(poses[currentPoseId]),
+                    currentTangent,
                     unitTangent(poses[poseId]));
             if (score > bestScore) {
                 bestScore = score;
@@ -1028,6 +1257,7 @@ private:
         std::uint64_t goalKey,
         const std::vector<voxel_planner::BusbarPose>& poses,
         const ActionCatalog& actions,
+        const PoseLut& poseLut,
         const BackwardDistanceField& backwardDistance,
         const CostPenaltyMap& penalties,
         const Point3D& rawStart,
@@ -1138,15 +1368,17 @@ private:
                     static_cast<std::uint32_t>(targetPoint.x),
                     static_cast<std::uint32_t>(targetPoint.y),
                     static_cast<std::uint32_t>(targetPoint.z));
+                const std::size_t direction = neighborIndex(delta);
                 const std::uint32_t targetPoseId = resolveTargetPose(
                     map,
                     targetVoxel,
                     current.poseId,
-                    poses);
+                    poses,
+                    delta,
+                    poseLut);
                 if (targetPoseId == kInvalidPoseId) {
                     continue;
                 }
-                const std::size_t direction = neighborIndex(delta);
                 const bool endpointImmune = isNearEndpoint(
                     targetPoint,
                     rawStart,
