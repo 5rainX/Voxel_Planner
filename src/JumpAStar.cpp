@@ -59,6 +59,8 @@ struct OpenNodeCompare {
 
 constexpr std::size_t kNoIndex =
     std::numeric_limits<std::size_t>::max();
+constexpr double kHeuristicWeight = 2.0;
+constexpr double kTieBreakScale = 1.001;
 
 /**
  * @brief Dense position-only search records.
@@ -129,6 +131,14 @@ double distance(const Point3D& lhs, const Point3D& rhs) {
     const double dy = static_cast<double>(lhs.y - rhs.y);
     const double dz = static_cast<double>(lhs.z - rhs.z);
     return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+double weightedHeuristic(
+    const Point3D& point,
+    const Point3D& goal) noexcept {
+    const double originalH = distance(point, goal);
+    const double tieBrokenH = originalH * kTieBreakScale;
+    return kHeuristicWeight * tieBrokenH;
 }
 
 bool isHardBlocked(
@@ -248,7 +258,10 @@ std::vector<Point3D> runSearch(
     records.parent[startIndex] = kNoIndex;
     records.closed[startIndex] = 0U;
     records.generatedCount = 1U;
-    open.push({startIndex, 0.0, distance(start, goal)});
+    open.push({
+        startIndex,
+        0.0,
+        weightedHeuristic(start, goal)});
 
     const auto relax = [&](std::size_t fromIndex,
                            const Point3D& to,
@@ -284,7 +297,7 @@ std::vector<Point3D> runSearch(
         queue.push({
             targetIndex,
             tentative,
-            tentative + distance(to, goal)});
+            tentative + weightedHeuristic(to, goal)});
     };
 
     while (!open.empty()) {
