@@ -101,20 +101,25 @@ public:
                 for (std::uint32_t x = 0U;
                      x < source.width_;
                      ++x) {
-                    const std::uint64_t addX =
-                        static_cast<std::uint64_t>(x) +
-                        static_cast<std::uint64_t>(radius) + 1U;
-                    if (addX < source.width_) {
-                        active += input[source.index(
-                            static_cast<std::uint32_t>(addX),
-                            y,
-                            z)];
-                    }
-                    if (static_cast<std::uint64_t>(x) >=
-                        static_cast<std::uint64_t>(radius)) {
-                        const std::uint32_t removeX =
-                            x - static_cast<std::uint32_t>(radius);
-                        active -= input[source.index(removeX, y, z)];
+                    if (x > 0U) {
+                        const std::uint64_t addX =
+                            static_cast<std::uint64_t>(x) +
+                            static_cast<std::uint64_t>(radius);
+                        if (addX < source.width_) {
+                            active += input[source.index(
+                                static_cast<std::uint32_t>(addX),
+                                y,
+                                z)];
+                        }
+                        const std::int64_t removeX =
+                            static_cast<std::int64_t>(x) -
+                            static_cast<std::int64_t>(radius) - 1;
+                        if (removeX >= 0) {
+                            active -= input[source.index(
+                                static_cast<std::uint32_t>(removeX),
+                                y,
+                                z)];
+                        }
                     }
                     output[source.index(x, y, z)] =
                         active > 0 ? 1U : 0U;
@@ -151,20 +156,25 @@ public:
                 for (std::uint32_t y = 0U;
                      y < source.height_;
                      ++y) {
-                    const std::uint64_t addY =
-                        static_cast<std::uint64_t>(y) +
-                        static_cast<std::uint64_t>(radius) + 1U;
-                    if (addY < source.height_) {
-                        active += input[source.index(
-                            x,
-                            static_cast<std::uint32_t>(addY),
-                            z)];
-                    }
-                    if (static_cast<std::uint64_t>(y) >=
-                        static_cast<std::uint64_t>(radius)) {
-                        const std::uint32_t removeY =
-                            y - static_cast<std::uint32_t>(radius);
-                        active -= input[source.index(x, removeY, z)];
+                    if (y > 0U) {
+                        const std::uint64_t addY =
+                            static_cast<std::uint64_t>(y) +
+                            static_cast<std::uint64_t>(radius);
+                        if (addY < source.height_) {
+                            active += input[source.index(
+                                x,
+                                static_cast<std::uint32_t>(addY),
+                                z)];
+                        }
+                        const std::int64_t removeY =
+                            static_cast<std::int64_t>(y) -
+                            static_cast<std::int64_t>(radius) - 1;
+                        if (removeY >= 0) {
+                            active -= input[source.index(
+                                x,
+                                static_cast<std::uint32_t>(removeY),
+                                z)];
+                        }
                     }
                     output[source.index(x, y, z)] =
                         active > 0 ? 1U : 0U;
@@ -201,20 +211,25 @@ public:
                 for (std::uint32_t z = 0U;
                      z < source.depth_;
                      ++z) {
-                    const std::uint64_t addZ =
-                        static_cast<std::uint64_t>(z) +
-                        static_cast<std::uint64_t>(radius) + 1U;
-                    if (addZ < source.depth_) {
-                        active += input[source.index(
-                            x,
-                            y,
-                            static_cast<std::uint32_t>(addZ))];
-                    }
-                    if (static_cast<std::uint64_t>(z) >=
-                        static_cast<std::uint64_t>(radius)) {
-                        const std::uint32_t removeZ =
-                            z - static_cast<std::uint32_t>(radius);
-                        active -= input[source.index(x, y, removeZ)];
+                    if (z > 0U) {
+                        const std::uint64_t addZ =
+                            static_cast<std::uint64_t>(z) +
+                            static_cast<std::uint64_t>(radius);
+                        if (addZ < source.depth_) {
+                            active += input[source.index(
+                                x,
+                                y,
+                                static_cast<std::uint32_t>(addZ))];
+                        }
+                        const std::int64_t removeZ =
+                            static_cast<std::int64_t>(z) -
+                            static_cast<std::int64_t>(radius) - 1;
+                        if (removeZ >= 0) {
+                            active -= input[source.index(
+                                x,
+                                y,
+                                static_cast<std::uint32_t>(removeZ))];
+                        }
                     }
                     output[source.index(x, y, z)] =
                         active > 0 ? 1U : 0U;

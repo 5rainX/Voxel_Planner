@@ -59,6 +59,9 @@ void PoseMaskPopulator::populate(
         seen[pose.poseId] = 1U;
     }
 
+    grid.lazyPoseFootprints_.reset();
+    grid.lazyPoseBounds_.reset();
+    grid.lazyUnconditionalBounds_ = {};
     grid.poseCount_ = poses.size();
     grid.poseMaskWordCount_ = (poses.size() + 63U) / 64U;
     if (grid.poseMaskWordCount_ > 10U) {

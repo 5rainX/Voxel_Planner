@@ -136,7 +136,7 @@ struct VoxelOffsetBounds {
 } // namespace voxel_planner
 
 /**
- * @brief Dense raw occupancy with sparse, precomputed pose masks.
+ * @brief Dense raw occupancy with eager or lazy pose-collision data.
  *
  * The storage is flattened with X as the fastest-changing dimension:
  * index = x + y * width + z * width * height.
@@ -194,6 +194,23 @@ struct VoxelGrid {
         if (storage_[linearIndex] == kRawObstacleValue ||
             storage_[linearIndex] == kBlockedStorageValue) {
             return 0U;
+        }
+        if (lazyPoseFootprints_) {
+            std::uint64_t mask = 0U;
+            const std::size_t firstPose = wordIndex * 64U;
+            const std::size_t lastPose = std::min(
+                poseCount_,
+                firstPose + 64U);
+            for (std::size_t poseId = firstPose;
+                 poseId < lastPose;
+                 ++poseId) {
+                if (isPoseAllowedByLazyFootprint(
+                        linearIndex,
+                        static_cast<std::uint32_t>(poseId))) {
+                    mask |= std::uint64_t{1} << (poseId % 64U);
+                }
+            }
+            return mask;
         }
         if (all_poses_allowed_[linearIndex]) {
             return allPoseMask_[wordIndex];
@@ -332,12 +349,16 @@ struct VoxelGrid {
     /**
      * Read-only single-pose fast path used by parallel A* expansion.
      *
-     * Pose masks are populated before a ProcessedMap becomes visible to
-     * search, so this query performs no cache allocation or mutation.
+     * This query performs no cache allocation or mutation. Depending on the
+     * map initialization mode it either reads an eager mask or evaluates the
+     * immutable lazy footprint data directly.
      */
     bool isPoseAllowedForSearch(
         std::size_t linearIndex,
         std::uint32_t poseId) const {
+        if (lazyPoseFootprints_) {
+            return isPoseAllowedByLazyFootprint(linearIndex, poseId);
+        }
         return isPoseAllowed(linearIndex, poseId);
     }
 
@@ -415,6 +436,111 @@ struct VoxelGrid {
         prefixDepth_ = prefixDepth;
     }
 
+    /**
+     * @brief Installs immutable pose footprints for lock-free lazy queries.
+     *
+     * The footprint data is prepared before the map is published. Queries
+     * then evaluate a pose directly without mutating the grid or a cache.
+     */
+    void attachLazyPoseData(
+        std::shared_ptr<
+            const std::vector<
+                std::vector<voxel_planner::VoxelOffset>>> footprints) {
+        if (!footprints || footprints->empty()) {
+            throw std::invalid_argument(
+                "Lazy pose footprints must be non-empty.");
+        }
+
+        const std::size_t wordCount = (footprints->size() + 63U) / 64U;
+        if (wordCount > 10U) {
+            throw std::overflow_error(
+                "Pose table exceeds the fixed mask capacity.");
+        }
+
+        auto bounds = std::make_shared<
+            std::vector<voxel_planner::VoxelOffsetBounds>>(
+                footprints->size());
+        voxel_planner::VoxelOffsetBounds unconditionalBounds{};
+        bool unconditionalInitialized = false;
+        for (std::size_t poseId = 0U;
+             poseId < footprints->size();
+             ++poseId) {
+            const std::vector<voxel_planner::VoxelOffset>& footprint =
+                (*footprints)[poseId];
+            if (footprint.empty()) {
+                throw std::invalid_argument(
+                    "Lazy pose footprints must not contain empty poses.");
+            }
+
+            voxel_planner::VoxelOffsetBounds poseBounds;
+            poseBounds.minDx = poseBounds.maxDx = footprint.front().dx;
+            poseBounds.minDy = poseBounds.maxDy = footprint.front().dy;
+            poseBounds.minDz = poseBounds.maxDz = footprint.front().dz;
+            for (const voxel_planner::VoxelOffset& offset : footprint) {
+                poseBounds.minDx = std::min(
+                    poseBounds.minDx,
+                    offset.dx);
+                poseBounds.maxDx = std::max(
+                    poseBounds.maxDx,
+                    offset.dx);
+                poseBounds.minDy = std::min(
+                    poseBounds.minDy,
+                    offset.dy);
+                poseBounds.maxDy = std::max(
+                    poseBounds.maxDy,
+                    offset.dy);
+                poseBounds.minDz = std::min(
+                    poseBounds.minDz,
+                    offset.dz);
+                poseBounds.maxDz = std::max(
+                    poseBounds.maxDz,
+                    offset.dz);
+            }
+            poseBounds.valid = true;
+            (*bounds)[poseId] = poseBounds;
+
+            if (!unconditionalInitialized) {
+                unconditionalBounds = poseBounds;
+                unconditionalInitialized = true;
+            } else {
+                unconditionalBounds.minDx = std::min(
+                    unconditionalBounds.minDx,
+                    poseBounds.minDx);
+                unconditionalBounds.maxDx = std::max(
+                    unconditionalBounds.maxDx,
+                    poseBounds.maxDx);
+                unconditionalBounds.minDy = std::min(
+                    unconditionalBounds.minDy,
+                    poseBounds.minDy);
+                unconditionalBounds.maxDy = std::max(
+                    unconditionalBounds.maxDy,
+                    poseBounds.maxDy);
+                unconditionalBounds.minDz = std::min(
+                    unconditionalBounds.minDz,
+                    poseBounds.minDz);
+                unconditionalBounds.maxDz = std::max(
+                    unconditionalBounds.maxDz,
+                    poseBounds.maxDz);
+            }
+        }
+        unconditionalBounds.valid = unconditionalInitialized;
+
+        poseCount_ = footprints->size();
+        poseMaskWordCount_ = wordCount;
+        allPoseMask_.assign(poseMaskWordCount_, ~std::uint64_t{0});
+        const std::size_t remainder = poseCount_ % 64U;
+        if (remainder != 0U) {
+            allPoseMask_.back() =
+                (std::uint64_t{1} << remainder) - 1U;
+        }
+        all_poses_allowed_.clear();
+        poseMaskSlots_.clear();
+        allowedPoseMask_.clear();
+        lazyUnconditionalBounds_ = unconditionalBounds;
+        lazyPoseBounds_ = std::move(bounds);
+        lazyPoseFootprints_ = std::move(footprints);
+    }
+
     void replaceRawStorage(
         std::uint32_t w,
         std::uint32_t h,
@@ -449,6 +575,9 @@ struct VoxelGrid {
         allowedPoseMask_.clear();
         allPoseMask_.clear();
         poseMaskWordCount_ = 0U;
+        lazyPoseFootprints_.reset();
+        lazyPoseBounds_.reset();
+        lazyUnconditionalBounds_ = {};
         morphologyPrefix_.reset();
         prefixWidth_ = 0U;
         prefixHeight_ = 0U;
@@ -497,6 +626,29 @@ struct VoxelGrid {
             return VoxelState::UNCONDITIONAL;
         }
 
+        if (lazyPoseFootprints_) {
+            const std::size_t plane =
+                static_cast<std::size_t>(width_) * height_;
+            if (plane != 0U) {
+                const int anchorZ = static_cast<int>(
+                    linearIndex / plane);
+                const std::size_t planeIndex = linearIndex % plane;
+                const int anchorY = static_cast<int>(
+                    planeIndex / width_);
+                const int anchorX = static_cast<int>(
+                    planeIndex % width_);
+                if (lazyUnconditionalBounds_.valid &&
+                    isObstacleFreeBox(
+                        anchorX,
+                        anchorY,
+                        anchorZ,
+                        lazyUnconditionalBounds_)) {
+                    return VoxelState::UNCONDITIONAL;
+                }
+            }
+            return VoxelState::POSE_CONDITIONAL;
+        }
+
         if (all_poses_allowed_[linearIndex]) {
             return VoxelState::UNCONDITIONAL;
         }
@@ -524,6 +676,12 @@ private:
     std::vector<bool> all_poses_allowed_;
     std::unordered_map<std::size_t, std::uint32_t> poseMaskSlots_;
     std::vector<std::uint64_t> allowedPoseMask_;
+    std::shared_ptr<
+        const std::vector<
+            std::vector<voxel_planner::VoxelOffset>>> lazyPoseFootprints_;
+    std::shared_ptr<
+        const std::vector<voxel_planner::VoxelOffsetBounds>> lazyPoseBounds_;
+    voxel_planner::VoxelOffsetBounds lazyUnconditionalBounds_{};
     std::shared_ptr<const std::vector<std::uint64_t>> morphologyPrefix_;
     std::uint32_t prefixWidth_ = 0U;
     std::uint32_t prefixHeight_ = 0U;
@@ -591,6 +749,67 @@ private:
                  occupancyBlockHeight_));
             rebuildOccupancyBlock(bx, by, bz);
         }
+    }
+
+    bool isPoseAllowedByLazyFootprint(
+        std::size_t linearIndex,
+        std::uint32_t poseId) const noexcept {
+        if (!lazyPoseFootprints_ ||
+            !lazyPoseBounds_ ||
+            linearIndex >= storage_.size() ||
+            poseId >= lazyPoseFootprints_->size() ||
+            poseId >= lazyPoseBounds_->size() ||
+            isObstacle(linearIndex) ||
+            width_ == 0U ||
+            height_ == 0U) {
+            return false;
+        }
+
+        const std::size_t plane =
+            static_cast<std::size_t>(width_) * height_;
+        if (plane == 0U) {
+            return false;
+        }
+        const int anchorZ = static_cast<int>(linearIndex / plane);
+        const std::size_t planeIndex = linearIndex % plane;
+        const int anchorY = static_cast<int>(planeIndex / width_);
+        const int anchorX = static_cast<int>(planeIndex % width_);
+
+        if (lazyUnconditionalBounds_.valid &&
+            isObstacleFreeBox(
+                anchorX,
+                anchorY,
+                anchorZ,
+                lazyUnconditionalBounds_)) {
+            return true;
+        }
+
+        const voxel_planner::VoxelOffsetBounds& poseBounds =
+            (*lazyPoseBounds_)[poseId];
+        if (poseBounds.valid &&
+            isObstacleFreeBox(
+                anchorX,
+                anchorY,
+                anchorZ,
+                poseBounds)) {
+            return true;
+        }
+
+        const std::vector<voxel_planner::VoxelOffset>& footprint =
+            (*lazyPoseFootprints_)[poseId];
+        for (const voxel_planner::VoxelOffset& offset : footprint) {
+            const int x = anchorX + offset.dx;
+            const int y = anchorY + offset.dy;
+            const int z = anchorZ + offset.dz;
+            if (!isValid(x, y, z) ||
+                isObstacle(index(
+                    static_cast<std::uint32_t>(x),
+                    static_cast<std::uint32_t>(y),
+                    static_cast<std::uint32_t>(z)))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     friend class module2_morphology::VoxelIO;

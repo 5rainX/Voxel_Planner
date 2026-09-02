@@ -13,7 +13,6 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
-#include <queue>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -155,18 +154,6 @@ int stepToward(int current, int target) noexcept {
     return current < target ? 1 : (current > target ? -1 : 0);
 }
 
-voxel_planner::Point3D pointFromVoxelIndex(
-    const VoxelGrid& grid,
-    std::size_t voxelIndex) {
-    const std::size_t plane =
-        static_cast<std::size_t>(grid.width()) * grid.height();
-    const int z = static_cast<int>(voxelIndex / plane);
-    const std::size_t remainder = voxelIndex % plane;
-    const int y = static_cast<int>(remainder / grid.width());
-    const int x = static_cast<int>(remainder % grid.width());
-    return {x, y, z};
-}
-
 void appendContinuous26(
     std::vector<voxel_planner::Point3D>& path,
     const voxel_planner::Point3D& target) {
@@ -205,6 +192,123 @@ voxel_planner::Point3D addOffset(
     const voxel_planner::Point3D& point,
     const voxel_planner::Point3D& offset) {
     return {point.x + offset.x, point.y + offset.y, point.z + offset.z};
+}
+
+voxel_planner::Point3D subtractOffset(
+    const voxel_planner::Point3D& point,
+    const voxel_planner::Point3D& offset) {
+    return {point.x - offset.x, point.y - offset.y, point.z - offset.z};
+}
+
+bool isPointInsideHintBand(
+    const voxel_planner::Point3D& point,
+    const std::vector<voxel_planner::Point3D>& hint,
+    float tolerance) {
+    if (hint.empty() || !std::isfinite(tolerance) || tolerance < 0.0F) {
+        return false;
+    }
+    const double radiusSquared =
+        static_cast<double>(tolerance) * tolerance;
+    for (const voxel_planner::Point3D& candidate : hint) {
+        const double dx = static_cast<double>(point.x - candidate.x);
+        const double dy = static_cast<double>(point.y - candidate.y);
+        const double dz = static_cast<double>(point.z - candidate.z);
+        if (dx * dx + dy * dy + dz * dz <= radiusSquared) {
+            return true;
+        }
+    }
+    return false;
+}
+
+voxel_planner::Point3D clampPointToGrid(
+    const VoxelGrid& grid,
+    const voxel_planner::Point3D& point) {
+    const auto maximumCoordinate = [](std::uint32_t dimension) {
+        const std::uint32_t maximum = dimension == 0U
+            ? 0U
+            : dimension - 1U;
+        return maximum > static_cast<std::uint32_t>(
+                    std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(maximum);
+    };
+    return {
+        std::max(0, std::min(point.x, maximumCoordinate(grid.width()))),
+        std::max(0, std::min(point.y, maximumCoordinate(grid.height()))),
+        std::max(0, std::min(point.z, maximumCoordinate(grid.depth())))};
+}
+
+bool findNearestFreeJumpVoxel(
+    const VoxelGrid& grid,
+    const voxel_planner::Point3D& origin,
+    int maximumRadius,
+    voxel_planner::Point3D& result) {
+    if (!grid.isValid(origin.x, origin.y, origin.z)) {
+        return false;
+    }
+    const std::size_t originIndex = grid.index(
+        static_cast<std::uint32_t>(origin.x),
+        static_cast<std::uint32_t>(origin.y),
+        static_cast<std::uint32_t>(origin.z));
+    if (!grid.isRawObstacle(originIndex)) {
+        result = origin;
+        return true;
+    }
+
+    const int radius = std::max(0, maximumRadius);
+    bool found = false;
+    std::int64_t bestDistanceSquared =
+        std::numeric_limits<std::int64_t>::max();
+    voxel_planner::Point3D best{};
+    for (int dz = -radius; dz <= radius; ++dz) {
+        for (int dy = -radius; dy <= radius; ++dy) {
+            for (int dx = -radius; dx <= radius; ++dx) {
+                const std::int64_t candidateX =
+                    static_cast<std::int64_t>(origin.x) + dx;
+                const std::int64_t candidateY =
+                    static_cast<std::int64_t>(origin.y) + dy;
+                const std::int64_t candidateZ =
+                    static_cast<std::int64_t>(origin.z) + dz;
+                if (candidateX < 0 || candidateY < 0 || candidateZ < 0 ||
+                    candidateX >= static_cast<std::int64_t>(grid.width()) ||
+                    candidateY >= static_cast<std::int64_t>(grid.height()) ||
+                    candidateZ >= static_cast<std::int64_t>(grid.depth())) {
+                    continue;
+                }
+                const voxel_planner::Point3D candidate{
+                    static_cast<int>(candidateX),
+                    static_cast<int>(candidateY),
+                    static_cast<int>(candidateZ)};
+                const std::size_t candidateIndex = grid.index(
+                    static_cast<std::uint32_t>(candidate.x),
+                    static_cast<std::uint32_t>(candidate.y),
+                    static_cast<std::uint32_t>(candidate.z));
+                if (grid.isRawObstacle(candidateIndex)) {
+                    continue;
+                }
+                const std::int64_t distanceSquared =
+                    static_cast<std::int64_t>(dx) * dx +
+                    static_cast<std::int64_t>(dy) * dy +
+                    static_cast<std::int64_t>(dz) * dz;
+                if (!found ||
+                    distanceSquared < bestDistanceSquared ||
+                    (distanceSquared == bestDistanceSquared &&
+                     std::tie(
+                         candidate.z,
+                         candidate.y,
+                         candidate.x) <
+                     std::tie(best.z, best.y, best.x))) {
+                    found = true;
+                    bestDistanceSquared = distanceSquared;
+                    best = candidate;
+                }
+            }
+        }
+    }
+    if (found) {
+        result = best;
+    }
+    return found;
 }
 
 constexpr int kHintProjectionMaxRadius = 12;
@@ -511,85 +615,6 @@ void mergeFallbackPlanningPaths(
         }
         destination.paths.push_back(std::move(candidate));
     }
-}
-
-struct RawEndpointResolution {
-    voxel_planner::Point3D point{};
-    bool shifted = false;
-};
-
-RawEndpointResolution resolveRawEndpointOutsideObstacle(
-    const VoxelGrid& grid,
-    const voxel_planner::Point3D& rawPoint,
-    const char* endpointName) {
-    if (!grid.isValid(rawPoint.x, rawPoint.y, rawPoint.z)) {
-        throw std::invalid_argument(
-            std::string("Raw ") + endpointName +
-            " point is outside the voxel map.");
-    }
-
-    const std::size_t startIndex = grid.index(
-        static_cast<std::uint32_t>(rawPoint.x),
-        static_cast<std::uint32_t>(rawPoint.y),
-        static_cast<std::uint32_t>(rawPoint.z));
-    if (!grid.isRawObstacle(startIndex)) {
-        return {rawPoint, false};
-    }
-
-    std::vector<bool> visited(grid.voxelCount(), false);
-    std::queue<std::size_t> frontier;
-    visited[startIndex] = true;
-    frontier.push(startIndex);
-
-    while (!frontier.empty()) {
-        const std::size_t levelCount = frontier.size();
-        for (std::size_t i = 0U; i < levelCount; ++i) {
-            const std::size_t currentIndex = frontier.front();
-            frontier.pop();
-            const voxel_planner::Point3D current =
-                pointFromVoxelIndex(grid, currentIndex);
-
-            for (int dz = -1; dz <= 1; ++dz) {
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        if (dx == 0 && dy == 0 && dz == 0) {
-                            continue;
-                        }
-                        const std::int64_t nextX =
-                            static_cast<std::int64_t>(current.x) + dx;
-                        const std::int64_t nextY =
-                            static_cast<std::int64_t>(current.y) + dy;
-                        const std::int64_t nextZ =
-                            static_cast<std::int64_t>(current.z) + dz;
-                        if (nextX < 0 || nextY < 0 || nextZ < 0 ||
-                            nextX >= static_cast<std::int64_t>(grid.width()) ||
-                            nextY >= static_cast<std::int64_t>(grid.height()) ||
-                            nextZ >= static_cast<std::int64_t>(grid.depth())) {
-                            continue;
-                        }
-                        const std::size_t nextIndex = grid.index(
-                            static_cast<std::uint32_t>(nextX),
-                            static_cast<std::uint32_t>(nextY),
-                            static_cast<std::uint32_t>(nextZ));
-                        if (visited[nextIndex]) {
-                            continue;
-                        }
-                        visited[nextIndex] = true;
-                        if (!grid.isRawObstacle(nextIndex)) {
-                            return {
-                                pointFromVoxelIndex(grid, nextIndex),
-                                true};
-                        }
-                        frontier.push(nextIndex);
-                    }
-                }
-            }
-        }
-    }
-
-    throw std::invalid_argument(
-        std::string("No raw obstacle-free voxel found near ") +
-        endpointName + " point.");
 }
 
 voxel_planner::Vector3D unitPoseNormal(
@@ -995,15 +1020,25 @@ ProcessedMap loadMap(
     }
 
     auto impl = std::make_shared<ProcessedMap::Impl>();
+    const auto ioParsingStart = ProfileClock::now();
     VoxelGrid rawGrid = module2_morphology::VoxelIO::loadVoxelMap(filepath);
-    const double safeRadiusValue = std::ceil(
-        static_cast<double>(thickness) / 2.0);
+    const auto ioParsingEnd = ProfileClock::now();
+    std::cout << "[PROBE] I/O Text Parsing: "
+              << profileMilliseconds(ioParsingEnd - ioParsingStart)
+              << " ms\n"
+              << std::flush;
+
+    const auto morphologyBuildStart = ProfileClock::now();
+    const double safeRadiusValue = std::floor(
+        (static_cast<double>(config.busbar_thickness) - 1.0) / 2.0);
     if (safeRadiusValue >
         static_cast<double>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument(
             "Busbar thickness is too large for safety dilation.");
     }
-    const int safeRadius = static_cast<int>(safeRadiusValue);
+    const int safeRadius = std::max(
+        1,
+        static_cast<int>(safeRadiusValue));
     impl->jumpGrid =
         module2_morphology::VoxelIO::buildSafetyDilatedGrid(
             rawGrid,
@@ -1017,6 +1052,11 @@ ProcessedMap loadMap(
                 kernelWidth,
                 kernelThickness,
                 kernelThickness});
+    const auto morphologyBuildEnd = ProfileClock::now();
+    std::cout << "[PROBE] Morphology Build: "
+              << profileMilliseconds(morphologyBuildEnd - morphologyBuildStart)
+              << " ms\n"
+              << std::flush;
     impl->grid = std::move(morphology.grid);
     impl->morphologyOffset = morphology.originOffset;
     impl->prefixSum =
@@ -1032,14 +1072,19 @@ ProcessedMap loadMap(
         impl->prefixDepth);
     impl->config = config;
     impl->poses = generateDiscretePoses(impl->config);
-    const module2_morphology::CachedPoseFootprints footprints =
-        module2_morphology::precomputePoseFootprints(
-            impl->poses,
-            impl->config);
-    module2_morphology::populateVoxelPoseMasks(
-        impl->grid,
-        impl->poses,
-        footprints);
+    const auto poseMaskPopulationStart = ProfileClock::now();
+    const auto footprints = std::make_shared<
+        const module2_morphology::CachedPoseFootprints>(
+            module2_morphology::precomputePoseFootprints(
+                impl->poses,
+                impl->config));
+    impl->grid.attachLazyPoseData(footprints);
+    const auto poseMaskPopulationEnd = ProfileClock::now();
+    std::cout << "[PROBE] Pose Mask Population (lazy setup): "
+              << profileMilliseconds(
+                     poseMaskPopulationEnd - poseMaskPopulationStart)
+              << " ms\n"
+              << std::flush;
     return ProcessedMap(std::move(impl));
 }
 
@@ -1106,126 +1151,6 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         "), goal=(" + std::to_string(goal.x) + ", " +
         std::to_string(goal.y) + ", " + std::to_string(goal.z) +
         "), max_paths=" + std::to_string(max_paths));
-    logProfileStageBegin("Raw endpoint resolution");
-    const auto rawEndpointResolutionStart = ProfileClock::now();
-    const RawEndpointResolution resolvedStart =
-        resolveRawEndpointOutsideObstacle(
-            map.impl_->jumpGrid,
-            start,
-            "start");
-    const RawEndpointResolution resolvedGoal =
-        resolveRawEndpointOutsideObstacle(
-            map.impl_->jumpGrid,
-            goal,
-            "goal");
-    const Point3D& jumpSafeStart = resolvedStart.point;
-    const Point3D& jumpSafeGoal = resolvedGoal.point;
-    const auto rawEndpointResolutionEnd = ProfileClock::now();
-    logProfileStageEnd(
-        "Raw endpoint resolution",
-        rawEndpointResolutionEnd - rawEndpointResolutionStart);
-    logProfileMessage(
-        "Raw safe_start=(" + std::to_string(jumpSafeStart.x) + ", " +
-        std::to_string(jumpSafeStart.y) + ", " +
-        std::to_string(jumpSafeStart.z) +
-        "), shifted=" + (resolvedStart.shifted ? "true" : "false") +
-        ", safe_goal=(" + std::to_string(jumpSafeGoal.x) + ", " +
-        std::to_string(jumpSafeGoal.y) + ", " +
-        std::to_string(jumpSafeGoal.z) +
-        "), shifted=" + (resolvedGoal.shifted ? "true" : "false"));
-    logProfileStageBegin("JumpAStar::findPaths");
-    const auto jumpStart = ProfileClock::now();
-    const std::vector<std::vector<Point3D>> jumpPaths =
-            module3_astar::JumpAStar::findPaths(
-            map.impl_->jumpGrid,
-            jumpSafeStart,
-            jumpSafeGoal,
-            max_paths,
-            start_pose,
-            end_pose);
-    const auto jumpEnd = ProfileClock::now();
-    logProfileStageEnd("JumpAStar::findPaths", jumpEnd - jumpStart);
-    logProfileMessage(
-        "JumpAStar paths=" + std::to_string(jumpPaths.size()));
-    for (std::size_t index = 0U; index < jumpPaths.size(); ++index) {
-        logProfileMessage(
-            "JumpAStar path[" + std::to_string(index) +
-            "] points=" + std::to_string(jumpPaths[index].size()));
-    }
-
-    std::vector<std::vector<Point3D>> topologyHintsInternal;
-    topologyHintsInternal.reserve(jumpPaths.size());
-    for (std::size_t pathIndex = 0U;
-         pathIndex < jumpPaths.size();
-         ++pathIndex) {
-        const std::vector<Point3D>& centerline = jumpPaths[pathIndex];
-        if (!centerline.empty() &&
-            centerline.front() == jumpSafeStart &&
-            centerline.back() == jumpSafeGoal) {
-            std::vector<Point3D> sourceHintPoints;
-            sourceHintPoints.reserve(centerline.size() + 2U);
-            sourceHintPoints.push_back(start);
-            for (const Point3D& point : centerline) {
-                if (sourceHintPoints.empty() ||
-                    !(sourceHintPoints.back() == point)) {
-                    sourceHintPoints.push_back(point);
-                }
-            }
-            if (sourceHintPoints.empty() ||
-                !(sourceHintPoints.back() == goal)) {
-                sourceHintPoints.push_back(goal);
-            }
-
-            HintProjectionResult projection =
-                projectTopologyHintToExpandedGrid(
-                    map.impl_->grid,
-                    sourceHintPoints,
-                    map.impl_->morphologyOffset);
-            if (projection.points.size() < 2U ||
-                projection.successRate <=
-                    kMinimumHintProjectionSuccessRatio) {
-                logProfileMessage(
-                    "Discarded JumpAStar hint[" +
-                    std::to_string(pathIndex) +
-                    "] after morphology projection; source_points=" +
-                    std::to_string(projection.sourcePointCount) +
-                    ", success_rate=" +
-                    std::to_string(projection.successRate * 100.0) +
-                    "%");
-                continue;
-            }
-            logProfileMessage(
-                "Projected JumpAStar hint[" +
-                std::to_string(pathIndex) +
-                "] onto expanded grid; source_points=" +
-                std::to_string(projection.sourcePointCount) +
-                ", output_points=" +
-                std::to_string(projection.points.size()) +
-                ", success_rate=" +
-                std::to_string(projection.successRate * 100.0) +
-                "%, snapped_points=" +
-                std::to_string(projection.projectedPointCount) +
-                ", filled_points=" +
-                std::to_string(projection.filledPointCount) +
-                ", corrected_points=" +
-                std::to_string(
-                    projection.projectedPointCount +
-                    projection.filledPointCount));
-            topologyHintsInternal.push_back(std::move(projection.points));
-        }
-    }
-    logProfileMessage(
-        "SE3 fallback triggered=true; topology_hints=" +
-        std::to_string(topologyHintsInternal.size()));
-    for (std::size_t index = 0U;
-         index < topologyHintsInternal.size();
-         ++index) {
-        logProfileMessage(
-            "Topology hint[" + std::to_string(index) +
-            "] points=" +
-            std::to_string(topologyHintsInternal[index].size()));
-    }
-
     logProfileStageBegin("SE3 endpoint resolution");
     const auto endpointResolutionStart = ProfileClock::now();
     const double routeDx =
@@ -1282,11 +1207,195 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         std::to_string(safeGoal.z) + "), goal_pose=" +
         std::to_string(resolvedPoseGoal.poseId));
 
+    const Point3D se3PhysicalStart = subtractOffset(
+        safeStart,
+        map.impl_->morphologyOffset);
+    const Point3D se3PhysicalGoal = subtractOffset(
+        safeGoal,
+        map.impl_->morphologyOffset);
+    Point3D jumpPhysicalStart = clampPointToGrid(
+        map.impl_->jumpGrid,
+        se3PhysicalStart);
+    Point3D jumpPhysicalGoal = clampPointToGrid(
+        map.impl_->jumpGrid,
+        se3PhysicalGoal);
+    const double requestedSnapRadius = std::max(
+        30.0,
+        static_cast<double>(map.impl_->config.busbar_width) + 10.0);
+    const double maximumRepresentableRadius = static_cast<double>(
+        std::numeric_limits<int>::max() - 1);
+    const int localSnapRadius = static_cast<int>(std::min(
+        requestedSnapRadius,
+        maximumRepresentableRadius));
+    const auto normalizeJumpEndpoint = [&](
+        Point3D& point,
+        const char* endpointName) {
+        const Point3D clamped = clampPointToGrid(
+            map.impl_->jumpGrid,
+            point);
+        if (!(clamped == point)) {
+            logProfileMessage(
+                std::string("[WARNING] Clamped JumpAStar ") +
+                endpointName + " endpoint to grid bounds.");
+            point = clamped;
+        }
+        const std::size_t voxelIndex = map.impl_->jumpGrid.index(
+            static_cast<std::uint32_t>(point.x),
+            static_cast<std::uint32_t>(point.y),
+            static_cast<std::uint32_t>(point.z));
+        if (!map.impl_->jumpGrid.isRawObstacle(voxelIndex)) {
+            return;
+        }
+
+        const Point3D blockedPoint = point;
+        Point3D snapped{};
+        if (!findNearestFreeJumpVoxel(
+                map.impl_->jumpGrid,
+                blockedPoint,
+                localSnapRadius,
+                snapped)) {
+            throw std::invalid_argument(
+                std::string("No free JumpAStar ") + endpointName +
+                " endpoint found within local snap radius.");
+        }
+        point = snapped;
+        logProfileMessage(
+            std::string("[WARNING] Locally snapped JumpAStar ") +
+            endpointName + " endpoint from (" +
+            std::to_string(blockedPoint.x) + ", " +
+            std::to_string(blockedPoint.y) + ", " +
+            std::to_string(blockedPoint.z) + ") to (" +
+            std::to_string(point.x) + ", " +
+            std::to_string(point.y) + ", " +
+            std::to_string(point.z) + "), radius=" +
+            std::to_string(localSnapRadius) + ".");
+    };
+    normalizeJumpEndpoint(jumpPhysicalStart, "start");
+    normalizeJumpEndpoint(jumpPhysicalGoal, "goal");
+    logProfileMessage(
+        "Jump physical roots: start=(" +
+        std::to_string(jumpPhysicalStart.x) + ", " +
+        std::to_string(jumpPhysicalStart.y) + ", " +
+        std::to_string(jumpPhysicalStart.z) + "), goal=(" +
+        std::to_string(jumpPhysicalGoal.x) + ", " +
+        std::to_string(jumpPhysicalGoal.y) + ", " +
+        std::to_string(jumpPhysicalGoal.z) + ")");
+
+    logProfileStageBegin("JumpAStar::findPaths");
+    const auto jumpStart = ProfileClock::now();
+    const std::vector<std::vector<Point3D>> jumpPaths =
+        module3_astar::JumpAStar::findPaths(
+            map.impl_->jumpGrid,
+            jumpPhysicalStart,
+            jumpPhysicalGoal,
+            max_paths,
+            start_pose,
+            end_pose);
+    const auto jumpEnd = ProfileClock::now();
+    logProfileStageEnd("JumpAStar::findPaths", jumpEnd - jumpStart);
+    logProfileMessage(
+        "JumpAStar paths=" + std::to_string(jumpPaths.size()));
+    for (std::size_t index = 0U; index < jumpPaths.size(); ++index) {
+        logProfileMessage(
+            "JumpAStar path[" + std::to_string(index) +
+            "] points=" + std::to_string(jumpPaths[index].size()));
+    }
+
+    std::vector<std::vector<Point3D>> topologyHintsInternal;
+    topologyHintsInternal.reserve(jumpPaths.size());
+    for (std::size_t pathIndex = 0U;
+         pathIndex < jumpPaths.size();
+         ++pathIndex) {
+        const std::vector<Point3D>& centerline = jumpPaths[pathIndex];
+        if (!centerline.empty() &&
+            centerline.front() == jumpPhysicalStart &&
+            centerline.back() == jumpPhysicalGoal) {
+            std::vector<Point3D> sourceHintPoints;
+            sourceHintPoints.reserve(centerline.size() + 2U);
+            sourceHintPoints.push_back(se3PhysicalStart);
+            for (const Point3D& point : centerline) {
+                if (sourceHintPoints.empty() ||
+                    !(sourceHintPoints.back() == point)) {
+                    sourceHintPoints.push_back(point);
+                }
+            }
+            if (sourceHintPoints.empty() ||
+                !(sourceHintPoints.back() == se3PhysicalGoal)) {
+                sourceHintPoints.push_back(se3PhysicalGoal);
+            }
+
+            HintProjectionResult projection =
+                projectTopologyHintToExpandedGrid(
+                    map.impl_->grid,
+                    sourceHintPoints,
+                    map.impl_->morphologyOffset);
+            if (projection.points.size() < 2U ||
+                projection.successRate <=
+                    kMinimumHintProjectionSuccessRatio) {
+                logProfileMessage(
+                    "Discarded JumpAStar hint[" +
+                    std::to_string(pathIndex) +
+                    "] after morphology projection; source_points=" +
+                    std::to_string(projection.sourcePointCount) +
+                    ", success_rate=" +
+                    std::to_string(projection.successRate * 100.0) +
+                    "%");
+                continue;
+            }
+            if (!(projection.points.front() == safeStart) ||
+                !(projection.points.back() == safeGoal)) {
+                throw std::runtime_error(
+                    "Projected topology hint endpoints do not match "
+                    "the resolved SE3 endpoints.");
+            }
+            logProfileMessage(
+                "Projected JumpAStar hint[" +
+                std::to_string(pathIndex) +
+                "] onto expanded grid; source_points=" +
+                std::to_string(projection.sourcePointCount) +
+                ", output_points=" +
+                std::to_string(projection.points.size()) +
+                ", success_rate=" +
+                std::to_string(projection.successRate * 100.0) +
+                "%, snapped_points=" +
+                std::to_string(projection.projectedPointCount) +
+                ", filled_points=" +
+                std::to_string(projection.filledPointCount) +
+                ", corrected_points=" +
+                std::to_string(
+                    projection.projectedPointCount +
+                    projection.filledPointCount));
+            topologyHintsInternal.push_back(std::move(projection.points));
+        }
+    }
+    logProfileMessage(
+        "SE3 fallback triggered=true; topology_hints=" +
+        std::to_string(topologyHintsInternal.size()));
+    for (std::size_t index = 0U;
+         index < topologyHintsInternal.size();
+         ++index) {
+        logProfileMessage(
+            "Topology hint[" + std::to_string(index) +
+            "] points=" +
+            std::to_string(topologyHintsInternal[index].size()));
+    }
+
     logProfileMessage(
         "BEGIN CoarseAStar::findPaths; internal work includes action catalog, "
         "backward voxel BFS, swept-volume validation, and diversity retries");
     if (topologyHintsInternal.empty()) {
         logProfileMessage("Topology hints unavailable; coarse fallback uses none");
+    } else {
+        const float topologyHintTolerance = std::max(
+            map.impl_->config.busbar_width * 2.0F,
+            30.0F);
+        if (!isPointInsideHintBand(
+                safeStart,
+                topologyHintsInternal.front(),
+                topologyHintTolerance)) {
+            logProfileMessage(
+                "[WARNING] Start voxel is outside Hint narrow-band!");
+        }
     }
     const auto runCoarseSearch =
         [&](const ResolvedEndpoint& searchStart,
