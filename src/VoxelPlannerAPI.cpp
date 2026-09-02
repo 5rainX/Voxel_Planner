@@ -1437,6 +1437,32 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 "[WARNING] Start voxel is outside Hint narrow-band!");
         }
     }
+    const auto adaptiveCoarseExpansionLimit =
+        [&](const std::vector<Point3D>* topologyHint) -> std::size_t {
+            if (topologyHint == nullptr || topologyHint->empty()) {
+                return 50000U;
+            }
+            const std::size_t adaptiveLimit =
+                topologyHint->size() * 1000U;
+            return std::max<std::size_t>(50000U, adaptiveLimit);
+        };
+    const auto adaptiveFallbackExpansionLimit =
+        [](const ResolvedEndpoint& searchStart,
+           const ResolvedEndpoint& searchGoal,
+           int requestedPaths) -> std::size_t {
+            const double dx = static_cast<double>(searchStart.point.x) -
+                searchGoal.point.x;
+            const double dy = static_cast<double>(searchStart.point.y) -
+                searchGoal.point.y;
+            const double dz = static_cast<double>(searchStart.point.z) -
+                searchGoal.point.z;
+            const double distance = std::sqrt(
+                dx * dx + dy * dy + dz * dz);
+            const std::size_t adaptiveLimit = static_cast<std::size_t>(
+                distance * 4000.0 *
+                static_cast<double>(requestedPaths));
+            return std::max<std::size_t>(150000U, adaptiveLimit);
+        };
     const auto runCoarseSearch =
         [&](const ResolvedEndpoint& searchStart,
             const ResolvedEndpoint& searchGoal,
@@ -1457,6 +1483,23 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 allowFullSearch,
                 maxExpansionsOverride);
         };
+    const std::size_t primaryCoarseExpansionLimit =
+        adaptiveCoarseExpansionLimit(
+            topologyHintsInternal.empty()
+                ? nullptr
+                : &topologyHintsInternal.front());
+    if (topologyHintsInternal.empty()) {
+        logProfileMessage(
+            "Adaptive coarse expansion limit=" +
+            std::to_string(primaryCoarseExpansionLimit) +
+            " (no hint available)");
+    } else {
+        logProfileMessage(
+            "Adaptive coarse expansion limit=" +
+            std::to_string(primaryCoarseExpansionLimit) +
+            " (hint_len=" +
+            std::to_string(topologyHintsInternal.front().size()) + ")");
+    }
     const auto coarseStart = ProfileClock::now();
     ::PlanningResult result = runCoarseSearch(
         selectedPoseStart,
@@ -1465,7 +1508,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 ? nullptr
                 : &topologyHintsInternal.front(),
         false,
-        0U);
+        primaryCoarseExpansionLimit);
     const auto coarseEnd = ProfileClock::now();
     logProfileStageEnd("CoarseAStar::findPaths total", coarseEnd - coarseStart);
     logProfileMessage(
@@ -1496,13 +1539,20 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 requestedPathCount - result.paths.size()) +
             " additional paths.");
         const auto fallbackStart = ProfileClock::now();
-        constexpr std::size_t kFallbackMaxExpansions = 3000000U;
+        const std::size_t fallbackMaxExpansions =
+            adaptiveFallbackExpansionLimit(
+                selectedPoseStart,
+                selectedPoseGoal,
+                max_paths);
+        logProfileMessage(
+            "Adaptive fallback expansion limit=" +
+            std::to_string(fallbackMaxExpansions));
         ::PlanningResult fallbackResult = runCoarseSearch(
             selectedPoseStart,
             selectedPoseGoal,
             nullptr,
             true,
-            kFallbackMaxExpansions);
+            fallbackMaxExpansions);
         const auto fallbackEnd = ProfileClock::now();
         logProfileStageEnd(
             "CoarseAStar fallback full search",
@@ -1579,7 +1629,10 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 snappedGoal,
                 nullptr,
                 true,
-                kFallbackMaxExpansions);
+                adaptiveFallbackExpansionLimit(
+                    snappedStart,
+                    snappedGoal,
+                    max_paths));
             const std::size_t snappedResultCount = snappedResult.paths.size();
             if (snappedResultCount != 0U) {
                 selectedPoseStart = snappedStart;

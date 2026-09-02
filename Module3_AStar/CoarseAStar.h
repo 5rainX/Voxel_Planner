@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <new>
 #include <queue>
 #include <stdexcept>
@@ -19,6 +20,70 @@
 #include <vector>
 
 namespace module3_astar {
+
+/**
+ * @brief Sparse, cache-friendly array backed by fixed-size pages.
+ *
+ * The page directory is allocated up front, while individual pages are
+ * created only when a value is written. Callers must complete all writes
+ * before publishing the array for concurrent const reads.
+ */
+template <typename T, std::size_t ChunkBits = 12U>
+class PagedArray {
+private:
+    static_assert(
+        ChunkBits < sizeof(std::size_t) * 8U,
+        "ChunkBits must fit within std::size_t.");
+
+    static constexpr std::size_t kChunkSize =
+        std::size_t{1} << ChunkBits;
+    static constexpr std::size_t kChunkMask = kChunkSize - 1U;
+    using Page = std::array<T, kChunkSize>;
+
+    std::vector<std::unique_ptr<Page>> pages_;
+    T defaultValue_;
+
+public:
+    PagedArray(
+        std::size_t totalElements,
+        T defaultValue)
+        : defaultValue_(defaultValue) {
+        const std::size_t pageCount =
+            totalElements / kChunkSize +
+            (totalElements % kChunkSize == 0U ? 0U : 1U);
+        pages_.resize(pageCount);
+    }
+
+    PagedArray(const PagedArray&) = delete;
+    PagedArray& operator=(const PagedArray&) = delete;
+    PagedArray(PagedArray&&) noexcept = default;
+    PagedArray& operator=(PagedArray&&) noexcept = default;
+
+    inline T get(std::size_t index) const noexcept {
+        const std::size_t pageIndex = index >> ChunkBits;
+        if (pageIndex >= pages_.size()) {
+            return defaultValue_;
+        }
+        const std::unique_ptr<Page>& page = pages_[pageIndex];
+        return page ? (*page)[index & kChunkMask] : defaultValue_;
+    }
+
+    inline void set(
+        std::size_t index,
+        T value) {
+        const std::size_t pageIndex = index >> ChunkBits;
+        if (pageIndex >= pages_.size()) {
+            throw std::out_of_range(
+                "PagedArray index is outside its configured size.");
+        }
+        std::unique_ptr<Page>& page = pages_[pageIndex];
+        if (!page) {
+            page = std::make_unique<Page>();
+            page->fill(defaultValue_);
+        }
+        (*page)[index & kChunkMask] = value;
+    }
+};
 
 /**
  * @brief Lightweight pose-aware A* over a 26-neighborhood voxel lattice.
@@ -495,7 +560,7 @@ private:
     static constexpr std::uint8_t kClosed = 2U;
     static constexpr int kMaxPathsPerRequest = 10;
     static constexpr int kMaxPenaltyRetriesPerPath = 10;
-    static constexpr std::size_t kMaxExpansionsPerPath = 1000000U;
+    static constexpr std::size_t kMaxExpansionsPerPath = 50000U;
     static constexpr float kGoalToleranceDistance = 5.0F;
     static constexpr float kHeuristicWeight = 1.5F;
     static constexpr double kGeometryTolerance = 1e-4;
@@ -560,14 +625,17 @@ private:
         std::uint32_t width = 0U;
         std::uint32_t height = 0U;
         std::uint32_t depth = 0U;
-        std::unordered_map<std::size_t, std::uint32_t> distances;
+        PagedArray<std::uint32_t> distances;
         std::size_t reachableVoxels = 0U;
 
+        BackwardDistanceField()
+            : distances(0U, kUnreachable) {}
+
+        explicit BackwardDistanceField(std::size_t totalElements)
+            : distances(totalElements, kUnreachable) {}
+
         std::uint32_t distance(std::size_t index) const noexcept {
-            const auto entry = distances.find(index);
-            return entry == distances.end()
-                ? kUnreachable
-                : entry->second;
+            return distances.get(index);
         }
     };
 
@@ -579,16 +647,24 @@ private:
      * are outside the hint band.
      */
     struct HintDistanceLut {
-        std::unordered_map<std::size_t, std::int32_t> hint_distance_map;
+        static constexpr std::int32_t kMissingValue = -1;
+        PagedArray<std::int32_t> hint_distance_map;
+        bool enabled_ = false;
+
+        HintDistanceLut()
+            : hint_distance_map(0U, kMissingValue) {}
+
+        explicit HintDistanceLut(std::size_t totalElements)
+            : hint_distance_map(totalElements, kMissingValue),
+              enabled_(true) {}
 
         bool enabled() const noexcept {
-            return !hint_distance_map.empty();
+            return enabled_;
         }
 
         bool contains(std::size_t voxelIndex) const noexcept {
-            const auto entry = hint_distance_map.find(voxelIndex);
-            return entry != hint_distance_map.end() &&
-                entry->second >= 0;
+            return enabled_ &&
+                hint_distance_map.get(voxelIndex) >= 0;
         }
     };
 
@@ -811,19 +887,15 @@ private:
         const VoxelGrid& map,
         const std::vector<Point3D>* topologyHint,
         float topologyHintTolerance) {
-        HintDistanceLut lut;
         if (topologyHint == nullptr ||
             topologyHint->empty() ||
             map.voxelCount() == 0U ||
             !std::isfinite(topologyHintTolerance) ||
             topologyHintTolerance < 0.0F) {
-            return lut;
+            return HintDistanceLut();
         }
 
-        if (topologyHint->size() <=
-            std::numeric_limits<std::size_t>::max() / 2U) {
-            lut.hint_distance_map.reserve(topologyHint->size() * 2U);
-        }
+        HintDistanceLut lut(map.voxelCount());
         const double radius =
             static_cast<double>(topologyHintTolerance);
         const double radiusSquared = radius * radius;
@@ -860,14 +932,12 @@ private:
                             static_cast<std::uint32_t>(z));
                         const std::int32_t distance =
                             (dx == 0 && dy == 0 && dz == 0) ? 0 : 1;
-                        const auto entry = lut.hint_distance_map.find(
-                            voxelIndex);
-                        if (entry == lut.hint_distance_map.end()) {
-                            lut.hint_distance_map.emplace(
+                        const std::int32_t current =
+                            lut.hint_distance_map.get(voxelIndex);
+                        if (current < 0 || distance == 0) {
+                            lut.hint_distance_map.set(
                                 voxelIndex,
                                 distance);
-                        } else if (distance == 0) {
-                            entry->second = 0;
                         }
                     }
                 }
@@ -1082,10 +1152,10 @@ private:
         const HintDistanceLut& hintLut,
         bool allowFullSearch) {
         BackwardDistanceField field;
+        field = BackwardDistanceField(map.voxelCount());
         field.width = map.width();
         field.height = map.height();
         field.depth = map.depth();
-        field.distances.reserve(65536U);
         if (goalVoxel >= map.voxelCount()) {
             return field;
         }
@@ -1093,7 +1163,7 @@ private:
             static_cast<std::size_t>(field.width) * field.height;
         std::vector<std::size_t> frontier;
         frontier.push_back(goalVoxel);
-        field.distances.emplace(goalVoxel, 0U);
+        field.distances.set(goalVoxel, 0U);
         field.reachableVoxels = 1U;
         while (!frontier.empty()) {
             std::vector<std::size_t> next;
@@ -1117,8 +1187,8 @@ private:
                     field.distance(current);
                 for (const std::size_t candidate : neighbors) {
                     if (candidate == current ||
-                        field.distances.find(candidate) !=
-                            field.distances.end()) {
+                        field.distance(candidate) !=
+                            BackwardDistanceField::kUnreachable) {
                         continue;
                     }
                     if (!allowFullSearch &&
@@ -1139,7 +1209,7 @@ private:
                             endpointImmunityRadius)) {
                         continue;
                     }
-                    field.distances.emplace(
+                    field.distances.set(
                         candidate,
                         currentDistance + 1U);
                     next.push_back(candidate);
