@@ -495,7 +495,7 @@ private:
     static constexpr std::uint8_t kClosed = 2U;
     static constexpr int kMaxPathsPerRequest = 10;
     static constexpr int kMaxPenaltyRetriesPerPath = 10;
-    static constexpr std::size_t kMaxExpansionsPerPath = 50000U;
+    static constexpr std::size_t kMaxExpansionsPerPath = 1000000U;
     static constexpr float kGoalToleranceDistance = 5.0F;
     static constexpr float kHeuristicWeight = 1.5F;
     static constexpr double kGeometryTolerance = 1e-4;
@@ -560,13 +560,14 @@ private:
         std::uint32_t width = 0U;
         std::uint32_t height = 0U;
         std::uint32_t depth = 0U;
-        std::vector<std::uint32_t> distances;
+        std::unordered_map<std::size_t, std::uint32_t> distances;
         std::size_t reachableVoxels = 0U;
 
         std::uint32_t distance(std::size_t index) const noexcept {
-            return index < distances.size()
-                ? distances[index]
-                : kUnreachable;
+            const auto entry = distances.find(index);
+            return entry == distances.end()
+                ? kUnreachable
+                : entry->second;
         }
     };
 
@@ -574,19 +575,20 @@ private:
      * @brief Per-request O(1) membership map for the topology hint band.
      *
      * A value of 0 denotes a voxel on the hint centerline. A value of 1
-     * denotes a voxel inside the configured hint tolerance. -1 means that
-     * the voxel is outside the hint band.
+     * denotes a voxel inside the configured hint tolerance. Missing entries
+     * are outside the hint band.
      */
     struct HintDistanceLut {
-        std::vector<std::int32_t> hint_distance_map;
+        std::unordered_map<std::size_t, std::int32_t> hint_distance_map;
 
         bool enabled() const noexcept {
             return !hint_distance_map.empty();
         }
 
         bool contains(std::size_t voxelIndex) const noexcept {
-            return voxelIndex < hint_distance_map.size() &&
-                hint_distance_map[voxelIndex] >= 0;
+            const auto entry = hint_distance_map.find(voxelIndex);
+            return entry != hint_distance_map.end() &&
+                entry->second >= 0;
         }
     };
 
@@ -818,9 +820,10 @@ private:
             return lut;
         }
 
-        lut.hint_distance_map.assign(
-            map.voxelCount(),
-            -1);
+        if (topologyHint->size() <=
+            std::numeric_limits<std::size_t>::max() / 2U) {
+            lut.hint_distance_map.reserve(topologyHint->size() * 2U);
+        }
         const double radius =
             static_cast<double>(topologyHintTolerance);
         const double radiusSquared = radius * radius;
@@ -855,10 +858,16 @@ private:
                             static_cast<std::uint32_t>(x),
                             static_cast<std::uint32_t>(y),
                             static_cast<std::uint32_t>(z));
-                        if (dx == 0 && dy == 0 && dz == 0) {
-                            lut.hint_distance_map[voxelIndex] = 0;
-                        } else if (lut.hint_distance_map[voxelIndex] < 0) {
-                            lut.hint_distance_map[voxelIndex] = 1;
+                        const std::int32_t distance =
+                            (dx == 0 && dy == 0 && dz == 0) ? 0 : 1;
+                        const auto entry = lut.hint_distance_map.find(
+                            voxelIndex);
+                        if (entry == lut.hint_distance_map.end()) {
+                            lut.hint_distance_map.emplace(
+                                voxelIndex,
+                                distance);
+                        } else if (distance == 0) {
+                            entry->second = 0;
                         }
                     }
                 }
@@ -1076,9 +1085,7 @@ private:
         field.width = map.width();
         field.height = map.height();
         field.depth = map.depth();
-        field.distances.assign(
-            map.voxelCount(),
-            BackwardDistanceField::kUnreachable);
+        field.distances.reserve(65536U);
         if (goalVoxel >= map.voxelCount()) {
             return field;
         }
@@ -1086,7 +1093,7 @@ private:
             static_cast<std::size_t>(field.width) * field.height;
         std::vector<std::size_t> frontier;
         frontier.push_back(goalVoxel);
-        field.distances[goalVoxel] = 0U;
+        field.distances.emplace(goalVoxel, 0U);
         field.reachableVoxels = 1U;
         while (!frontier.empty()) {
             std::vector<std::size_t> next;
@@ -1106,10 +1113,12 @@ private:
                     y + 1U < field.height ? current + field.width : current,
                     z > 0U ? current - plane : current,
                     z + 1U < field.depth ? current + plane : current};
+                const std::uint32_t currentDistance =
+                    field.distance(current);
                 for (const std::size_t candidate : neighbors) {
                     if (candidate == current ||
-                        field.distances[candidate] !=
-                            BackwardDistanceField::kUnreachable) {
+                        field.distances.find(candidate) !=
+                            field.distances.end()) {
                         continue;
                     }
                     if (!allowFullSearch &&
@@ -1130,8 +1139,9 @@ private:
                             endpointImmunityRadius)) {
                         continue;
                     }
-                    field.distances[candidate] =
-                        field.distances[current] + 1U;
+                    field.distances.emplace(
+                        candidate,
+                        currentDistance + 1U);
                     next.push_back(candidate);
                     ++field.reachableVoxels;
                 }

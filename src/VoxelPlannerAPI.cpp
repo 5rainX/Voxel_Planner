@@ -952,6 +952,8 @@ FallbackEndpointSnap snapEndpointToFreeSpaceForFallback(
 namespace voxel_planner {
 
 struct ProcessedMap::Impl {
+    // Preserve the source occupancy grid for read-only planning fallbacks.
+    VoxelGrid rawGrid;
     VoxelGrid jumpGrid;
     VoxelGrid grid;
     std::vector<BusbarPose> poses;
@@ -1021,7 +1023,7 @@ ProcessedMap loadMap(
 
     auto impl = std::make_shared<ProcessedMap::Impl>();
     const auto ioParsingStart = ProfileClock::now();
-    VoxelGrid rawGrid = module2_morphology::VoxelIO::loadVoxelMap(filepath);
+    impl->rawGrid = module2_morphology::VoxelIO::loadVoxelMap(filepath);
     const auto ioParsingEnd = ProfileClock::now();
     std::cout << "[PROBE] I/O Text Parsing: "
               << profileMilliseconds(ioParsingEnd - ioParsingStart)
@@ -1041,13 +1043,13 @@ ProcessedMap loadMap(
         static_cast<int>(safeRadiusValue));
     impl->jumpGrid =
         module2_morphology::VoxelIO::buildSafetyDilatedGrid(
-            rawGrid,
+            impl->rawGrid,
             safeRadius);
     const int kernelWidth = static_cast<int>(std::ceil(width));
     const int kernelThickness = static_cast<int>(std::ceil(thickness));
     module2_morphology::MorphologyResult morphology =
         module2_morphology::VoxelMorphologyEngine::buildCoarseBlockedMap(
-            rawGrid,
+            impl->rawGrid,
             module2_morphology::MorphologyKernel{
                 kernelWidth,
                 kernelThickness,
@@ -1228,10 +1230,11 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         requestedSnapRadius,
         maximumRepresentableRadius));
     const auto normalizeJumpEndpoint = [&](
+        const VoxelGrid& jumpMap,
         Point3D& point,
         const char* endpointName) {
         const Point3D clamped = clampPointToGrid(
-            map.impl_->jumpGrid,
+            jumpMap,
             point);
         if (!(clamped == point)) {
             logProfileMessage(
@@ -1239,18 +1242,18 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 endpointName + " endpoint to grid bounds.");
             point = clamped;
         }
-        const std::size_t voxelIndex = map.impl_->jumpGrid.index(
+        const std::size_t voxelIndex = jumpMap.index(
             static_cast<std::uint32_t>(point.x),
             static_cast<std::uint32_t>(point.y),
             static_cast<std::uint32_t>(point.z));
-        if (!map.impl_->jumpGrid.isRawObstacle(voxelIndex)) {
+        if (!jumpMap.isRawObstacle(voxelIndex)) {
             return;
         }
 
         const Point3D blockedPoint = point;
         Point3D snapped{};
         if (!findNearestFreeJumpVoxel(
-                map.impl_->jumpGrid,
+                jumpMap,
                 blockedPoint,
                 localSnapRadius,
                 snapped)) {
@@ -1268,10 +1271,10 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
             std::to_string(point.x) + ", " +
             std::to_string(point.y) + ", " +
             std::to_string(point.z) + "), radius=" +
-            std::to_string(localSnapRadius) + ".");
+        std::to_string(localSnapRadius) + ".");
     };
-    normalizeJumpEndpoint(jumpPhysicalStart, "start");
-    normalizeJumpEndpoint(jumpPhysicalGoal, "goal");
+    normalizeJumpEndpoint(map.impl_->jumpGrid, jumpPhysicalStart, "start");
+    normalizeJumpEndpoint(map.impl_->jumpGrid, jumpPhysicalGoal, "goal");
     logProfileMessage(
         "Jump physical roots: start=(" +
         std::to_string(jumpPhysicalStart.x) + ", " +
@@ -1283,7 +1286,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
 
     logProfileStageBegin("JumpAStar::findPaths");
     const auto jumpStart = ProfileClock::now();
-    const std::vector<std::vector<Point3D>> jumpPaths =
+    std::vector<std::vector<Point3D>> jumpPaths =
         module3_astar::JumpAStar::findPaths(
             map.impl_->jumpGrid,
             jumpPhysicalStart,
@@ -1291,6 +1294,43 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
             max_paths,
             start_pose,
             end_pose);
+    Point3D topologyJumpStart = jumpPhysicalStart;
+    Point3D topologyJumpGoal = jumpPhysicalGoal;
+    if (jumpPaths.empty()) {
+        logProfileMessage(
+            "[WARNING] JumpAStar failed on dilated grid. Retrying on raw grid...");
+        Point3D rawJumpPhysicalStart = clampPointToGrid(
+            map.impl_->rawGrid,
+            se3PhysicalStart);
+        Point3D rawJumpPhysicalGoal = clampPointToGrid(
+            map.impl_->rawGrid,
+            se3PhysicalGoal);
+        normalizeJumpEndpoint(
+            map.impl_->rawGrid,
+            rawJumpPhysicalStart,
+            "raw start");
+        normalizeJumpEndpoint(
+            map.impl_->rawGrid,
+            rawJumpPhysicalGoal,
+            "raw goal");
+        std::vector<std::vector<Point3D>> rawJumpPaths =
+            module3_astar::JumpAStar::findPaths(
+                map.impl_->rawGrid,
+                rawJumpPhysicalStart,
+                rawJumpPhysicalGoal,
+                max_paths,
+                start_pose,
+                end_pose);
+        const std::size_t rawJumpPathCount = rawJumpPaths.size();
+        if (!rawJumpPaths.empty()) {
+            jumpPaths = std::move(rawJumpPaths);
+            topologyJumpStart = rawJumpPhysicalStart;
+            topologyJumpGoal = rawJumpPhysicalGoal;
+        }
+        logProfileMessage(
+            "JumpAStar raw-grid retry paths=" +
+            std::to_string(rawJumpPathCount));
+    }
     const auto jumpEnd = ProfileClock::now();
     logProfileStageEnd("JumpAStar::findPaths", jumpEnd - jumpStart);
     logProfileMessage(
@@ -1308,8 +1348,8 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
          ++pathIndex) {
         const std::vector<Point3D>& centerline = jumpPaths[pathIndex];
         if (!centerline.empty() &&
-            centerline.front() == jumpPhysicalStart &&
-            centerline.back() == jumpPhysicalGoal) {
+            centerline.front() == topologyJumpStart &&
+            centerline.back() == topologyJumpGoal) {
             std::vector<Point3D> sourceHintPoints;
             sourceHintPoints.reserve(centerline.size() + 2U);
             sourceHintPoints.push_back(se3PhysicalStart);
@@ -1456,7 +1496,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 requestedPathCount - result.paths.size()) +
             " additional paths.");
         const auto fallbackStart = ProfileClock::now();
-        constexpr std::size_t kFallbackMaxExpansions = 150000U;
+        constexpr std::size_t kFallbackMaxExpansions = 3000000U;
         ::PlanningResult fallbackResult = runCoarseSearch(
             selectedPoseStart,
             selectedPoseGoal,
@@ -1489,7 +1529,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
             std::to_string(fallbackAddedPathCount) +
             ", message=" + fallbackMessage);
 
-        // Do not leave the primary Hint search's stale 50k-expansion error
+        // Do not leave the primary Hint search's stale expansion error
         // in place when the fallback is the last completed search.
         if (fallbackAddedPathCount != 0U) {
             result.status = ::PlannerStatus::OK;
