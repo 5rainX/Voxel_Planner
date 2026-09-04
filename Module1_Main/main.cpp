@@ -3,59 +3,105 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+
+namespace {
+
+void printUsage(const char* executableName) {
+    std::cerr
+        << "Usage: " << executableName
+        << " <voxel_map.txt_or_vtk>"
+        << " <start_x> <start_y> <start_z>"
+        << " <goal_x> <goal_y> <goal_z>"
+        << " <max_paths>"
+        << " [width thickness]"
+        << " [flat_bend_factor vertical_bend_factor]\n";
+}
+
+int parseIntArgument(const char* value, const char* name) {
+    try {
+        std::size_t consumed = 0U;
+        const int parsed = std::stoi(value, &consumed);
+        if (value[consumed] != '\0') {
+            throw std::invalid_argument("trailing characters");
+        }
+        return parsed;
+    } catch (const std::exception&) {
+        throw std::invalid_argument(
+            std::string("Invalid integer argument: ") + name);
+    }
+}
+
+float parseFloatArgument(const char* value, const char* name) {
+    try {
+        std::size_t consumed = 0U;
+        const float parsed = std::stof(value, &consumed);
+        if (value[consumed] != '\0') {
+            throw std::invalid_argument("trailing characters");
+        }
+        return parsed;
+    } catch (const std::exception&) {
+        throw std::invalid_argument(
+            std::string("Invalid numeric argument: ") + name);
+    }
+}
+
+void printDensePath(
+    std::size_t pathIndex,
+    const voxel_planner::PathResult& path) {
+    std::cout << "Path " << (pathIndex + 1U)
+              << ": cost=" << path.cost
+              << ", waypoints=" << path.path.size()
+              << ", conditional_poses="
+              << path.pose_description.size() << "\n";
+    for (std::size_t pointIndex = 0U;
+         pointIndex < path.path.size();
+         ++pointIndex) {
+        const voxel_planner::Point3D& point = path.path[pointIndex];
+        std::cout << "  voxel " << pointIndex
+                  << ": " << point.x
+                  << ' ' << point.y
+                  << ' ' << point.z << "\n";
+    }
+}
+
+} // namespace
 
 /**
  * @brief CLI wrapper for the public planner facade.
  */
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0]
-                  << " <voxel_map.txt_or_vtk>\n";
-        return 2;
-    }
-
-    std::cout << "Busbar width and thickness [default 35 5]: ";
-    float width = 35.0F;
-    float thickness = 5.0F;
-    std::string dimensions;
-    std::getline(std::cin, dimensions);
-    if (!dimensions.empty()) {
-        try {
-            const std::size_t separator = dimensions.find(' ');
-            width = std::stof(dimensions.substr(0, separator));
-            thickness = std::stof(
-                dimensions.substr(separator + 1U));
-        } catch (const std::exception&) {
-            std::cerr << "Invalid physical dimensions.\n";
-            return 2;
-        }
-    }
-
-    voxel_planner::Point3D start;
-    voxel_planner::Point3D goal;
-    std::cout << "Start point (x y z): ";
-    if (!(std::cin >> start.x >> start.y >> start.z)) {
-        std::cerr << "Invalid start point.\n";
-        return 2;
-    }
-    std::cout << "Goal point (x y z): ";
-    if (!(std::cin >> goal.x >> goal.y >> goal.z)) {
-        std::cerr << "Invalid goal point.\n";
-        return 2;
-    }
-
-    int maxPaths = 0;
-    std::cout << "Max paths: ";
-    if (!(std::cin >> maxPaths)) {
-        std::cerr << "Invalid max_paths.\n";
+    if (argc != 9 && argc != 11 && argc != 13) {
+        printUsage(argv[0]);
         return 2;
     }
 
     try {
+        const voxel_planner::Point3D start{
+            parseIntArgument(argv[2], "start_x"),
+            parseIntArgument(argv[3], "start_y"),
+            parseIntArgument(argv[4], "start_z")};
+        const voxel_planner::Point3D goal{
+            parseIntArgument(argv[5], "goal_x"),
+            parseIntArgument(argv[6], "goal_y"),
+            parseIntArgument(argv[7], "goal_z")};
+        const int maxPaths = parseIntArgument(argv[8], "max_paths");
+        const float width = argc >= 11
+            ? parseFloatArgument(argv[9], "width")
+            : 35.0F;
+        const float thickness = argc >= 11
+            ? parseFloatArgument(argv[10], "thickness")
+            : 5.0F;
         const auto begin = std::chrono::steady_clock::now();
-        const voxel_planner::ProcessedMap map =
-            voxel_planner::loadMap(argv[1], width, thickness);
+        const voxel_planner::ProcessedMap map = argc == 13
+            ? voxel_planner::loadMap(
+                  argv[1],
+                  width,
+                  thickness,
+                  parseFloatArgument(argv[11], "flat_bend_factor"),
+                  parseFloatArgument(argv[12], "vertical_bend_factor"))
+            : voxel_planner::loadMap(argv[1], width, thickness);
         const auto result =
             voxel_planner::findPaths(
                 map,
@@ -77,14 +123,9 @@ int main(int argc, char* argv[]) {
         for (std::size_t pathIndex = 0U;
              pathIndex < paths.size();
              ++pathIndex) {
-            const voxel_planner::PathResult& path = paths[pathIndex];
-            std::cout << "Path " << (pathIndex + 1U)
-                      << ": cost=" << path.cost
-                      << ", waypoints=" << path.path.size()
-                      << ", conditional_poses="
-                      << path.pose_description.size() << "\n";
+            printDensePath(pathIndex, paths[pathIndex]);
         }
-        return result.first == voxel_planner::PlanStatus::OK ? 0 : 1;
+        return 0;
     } catch (const std::exception& error) {
         std::cerr << "Planner error: " << error.what() << "\n";
         return 1;

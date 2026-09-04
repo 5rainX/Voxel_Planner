@@ -61,12 +61,53 @@ struct PoseDescription {
 };
 
 /**
+ * @brief Ordered waypoint constraint requested by an external caller.
+ */
+struct WaypointConstraint {
+    Point3D point{};
+    Vector3D tangent{1.0, 0.0, 0.0};
+    int tolerance = 0;
+};
+
+/**
+ * @brief Metadata describing where an ordered waypoint was hit.
+ */
+struct WaypointHit {
+    std::size_t constraint_index = 0U;
+    std::size_t path_index = 0U;
+    Point3D point{};
+    Vector3D normal{};
+    Vector3D tangent{};
+};
+
+/**
+ * @brief Requested terminal orientation and straight lengths.
+ */
+struct TerminalConstraints {
+    Vector3D start_normal{0.0, 0.0, 1.0};
+    Vector3D start_tangent{1.0, 0.0, 0.0};
+    Vector3D end_normal{0.0, 0.0, 1.0};
+    Vector3D end_tangent{1.0, 0.0, 0.0};
+    float min_begin_length = 0.0F;
+    float min_end_length = 0.0F;
+};
+
+/**
+ * @brief Optional computation limits for coarse search stages.
+ */
+struct CoarseSearchLimits {
+    std::size_t max_expansions_per_stage = 0U;
+};
+
+/**
  * @brief One costed centerline returned by the multi-path planner.
  */
 struct PathResult {
     std::vector<Point3D> path;
     std::vector<PoseDescription> pose_description;
-    float cost = 0.0F;
+    std::vector<PoseDescription> centerline_poses;
+    std::vector<WaypointHit> waypoint_hits;
+    double cost = 0.0;
 };
 
 /**
@@ -113,6 +154,17 @@ private:
         const std::string& filepath,
         float width,
         float thickness);
+    friend ProcessedMap loadMap(
+        const std::string& filepath,
+        float width,
+        float thickness,
+        float flat_bend_factor,
+        float vertical_bend_factor);
+    friend std::pair<PlanStatus, std::vector<PathResult>> findPaths(
+        const ProcessedMap& map,
+        const Point3D& start,
+        const Point3D& goal,
+        int max_paths);
     friend std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         const ProcessedMap& map,
         const Point3D& start,
@@ -120,6 +172,19 @@ private:
         int max_paths,
         const EndpointPose& start_pose,
         const EndpointPose& end_pose);
+    friend std::pair<PlanStatus, std::vector<PathResult>> findPaths(
+        const ProcessedMap& map,
+        const Point3D& start,
+        const Point3D& goal,
+        int max_paths,
+        const TerminalConstraints& terminal_constraints,
+        const std::vector<WaypointConstraint>& waypoint_constraints,
+        const CoarseSearchLimits& coarse_limits);
+    friend bool isPoseAllowed(
+        const ProcessedMap& map,
+        const Point3D& point,
+        const Vector3D& normal,
+        const Vector3D& tangent);
 };
 
 /**
@@ -136,6 +201,16 @@ ProcessedMap loadMap(
     const std::string& filepath,
     float width,
     float thickness);
+
+/**
+ * @brief Loads a voxel map using explicit flat/vertical bend factors.
+ */
+ProcessedMap loadMap(
+    const std::string& filepath,
+    float width,
+    float thickness,
+    float flat_bend_factor,
+    float vertical_bend_factor);
 
 /**
  * @brief Finds cost-sorted coarse SE(3) routes in a loaded map.
@@ -157,9 +232,6 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
 
 /**
  * @brief Finds routes using explicit start and goal endpoint orientations.
- *
- * The requested normal and tangent are mapped to the nearest generated pose
- * that is collision-free at the resolved endpoint voxel.
  */
 std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     const ProcessedMap& map,
@@ -168,5 +240,26 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     int max_paths,
     const EndpointPose& start_pose,
     const EndpointPose& end_pose);
+
+/**
+ * @brief Finds routes with terminal, ordered-waypoint, and coarse limits.
+ */
+std::pair<PlanStatus, std::vector<PathResult>> findPaths(
+    const ProcessedMap& map,
+    const Point3D& start,
+    const Point3D& goal,
+    int max_paths,
+    const TerminalConstraints& terminal_constraints,
+    const std::vector<WaypointConstraint>& waypoint_constraints,
+    const CoarseSearchLimits& coarse_limits);
+
+/**
+ * @brief Tests whether a continuous normal/tangent pose is allowed at a point.
+ */
+bool isPoseAllowed(
+    const ProcessedMap& map,
+    const Point3D& point,
+    const Vector3D& normal,
+    const Vector3D& tangent);
 
 } // namespace voxel_planner

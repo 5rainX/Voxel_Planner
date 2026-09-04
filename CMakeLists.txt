@@ -49,10 +49,16 @@ target_compile_options(voxel_planner PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra;-Wpedantic>
 )
 
-add_executable(simulate_caller Module1_Main/main.cpp)
-target_link_libraries(simulate_caller PRIVATE voxel_planner)
-target_compile_options(simulate_caller PRIVATE
-    $<$<CONFIG:Release>:$<$<CXX_COMPILER_ID:MSVC>:/O2>>
-    $<$<CONFIG:Release>:$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-O3>>
-    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra;-Wpedantic>
-)
+function(add_voxel_planner_cli target_name)
+    add_executable(${target_name} Module1_Main/main.cpp)
+    target_link_libraries(${target_name} PRIVATE voxel_planner)
+    target_compile_options(${target_name} PRIVATE
+        $<$<CONFIG:Release>:$<$<CXX_COMPILER_ID:MSVC>:/O2>>
+        $<$<CONFIG:Release>:$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-O3>>
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra;-Wpedantic>
+    )
+endfunction()
+
+add_voxel_planner_cli(simulate_caller)
+add_voxel_planner_cli(benchmark_runner)
+add_voxel_planner_cli(busbar_example)

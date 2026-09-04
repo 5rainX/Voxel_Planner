@@ -94,6 +94,73 @@ bool areOrthogonal(
         lhs.z * rhs.z) <= 1e-6;
 }
 
+bool normalizeVector(
+    const voxel_planner::Vector3D& input,
+    voxel_planner::Vector3D& output) {
+    if (!std::isfinite(input.x) ||
+        !std::isfinite(input.y) ||
+        !std::isfinite(input.z)) {
+        return false;
+    }
+    const double length = std::sqrt(
+        input.x * input.x +
+        input.y * input.y +
+        input.z * input.z);
+    if (!std::isfinite(length) || length <= 1e-12) {
+        return false;
+    }
+    output = {input.x / length, input.y / length, input.z / length};
+    return true;
+}
+
+voxel_planner::Vector3D fallbackNormalForTangent(
+    const voxel_planner::Vector3D& tangent) {
+    const voxel_planner::Vector3D reference =
+        std::abs(tangent.z) < 0.9
+            ? voxel_planner::Vector3D{0.0, 0.0, 1.0}
+            : voxel_planner::Vector3D{0.0, 1.0, 0.0};
+    voxel_planner::Vector3D normal{
+        reference.y * tangent.z - reference.z * tangent.y,
+        reference.z * tangent.x - reference.x * tangent.z,
+        reference.x * tangent.y - reference.y * tangent.x};
+    normalizeVector(normal, normal);
+    return normal;
+}
+
+voxel_planner::Vector3D normalizeOrFallbackNormal(
+    const voxel_planner::Vector3D& requestedNormal,
+    const voxel_planner::Vector3D& tangent) {
+    voxel_planner::Vector3D normal{};
+    if (normalizeVector(requestedNormal, normal) &&
+        areOrthogonal(normal, tangent)) {
+        return normal;
+    }
+    return fallbackNormalForTangent(tangent);
+}
+
+void validateEndpointConstraint(
+    const voxel_planner::EndpointConstraint& constraint);
+
+voxel_planner::EndpointConstraint toEndpointConstraint(
+    const voxel_planner::TerminalConstraints& terminal) {
+    voxel_planner::EndpointConstraint constraint;
+    if (!normalizeVector(terminal.start_tangent, constraint.start_tangent) ||
+        !normalizeVector(terminal.end_tangent, constraint.end_tangent)) {
+        throw std::invalid_argument(
+            "Terminal tangents must be finite non-zero vectors.");
+    }
+    constraint.start_normal = normalizeOrFallbackNormal(
+        terminal.start_normal,
+        constraint.start_tangent);
+    constraint.end_normal = normalizeOrFallbackNormal(
+        terminal.end_normal,
+        constraint.end_tangent);
+    constraint.min_begin_length = terminal.min_begin_length;
+    constraint.min_end_length = terminal.min_end_length;
+    validateEndpointConstraint(constraint);
+    return constraint;
+}
+
 void validateEndpointConstraint(
     const voxel_planner::EndpointConstraint& constraint) {
     if (!isUnitVector(constraint.start_normal) ||
@@ -658,6 +725,61 @@ void appendPublicConditionalPose(
     described[waypointIndex] = true;
 }
 
+bool isInsideWaypointTolerance(
+    const voxel_planner::Point3D& point,
+    const voxel_planner::WaypointConstraint& constraint) {
+    const int tolerance = std::max(0, constraint.tolerance);
+    return std::abs(point.x - constraint.point.x) <= tolerance &&
+           std::abs(point.y - constraint.point.y) <= tolerance &&
+           std::abs(point.z - constraint.point.z) <= tolerance;
+}
+
+std::vector<voxel_planner::WaypointHit> findOrderedWaypointHits(
+    const std::vector<voxel_planner::Point3D>& path,
+    const std::vector<voxel_planner::PoseDescription>& centerlinePoses,
+    const std::vector<voxel_planner::WaypointConstraint>& constraints) {
+    std::vector<voxel_planner::WaypointHit> hits;
+    hits.reserve(constraints.size());
+    if (path.empty() || centerlinePoses.size() != path.size()) {
+        return hits;
+    }
+
+    std::size_t searchBegin = 0U;
+    for (std::size_t constraintIndex = 0U;
+         constraintIndex < constraints.size();
+         ++constraintIndex) {
+        const voxel_planner::WaypointConstraint& constraint =
+            constraints[constraintIndex];
+        std::size_t matchedIndex = path.size();
+        for (std::size_t pathIndex = searchBegin;
+             pathIndex < path.size();
+             ++pathIndex) {
+            if (isInsideWaypointTolerance(path[pathIndex], constraint)) {
+                matchedIndex = pathIndex;
+                break;
+            }
+        }
+        if (matchedIndex == path.size()) {
+            return hits;
+        }
+
+        voxel_planner::Vector3D tangent{};
+        if (!normalizeVector(constraint.tangent, tangent)) {
+            return hits;
+        }
+        const voxel_planner::PoseDescription& pose =
+            centerlinePoses[matchedIndex];
+        hits.push_back({
+            constraintIndex,
+            matchedIndex,
+            path[matchedIndex],
+            pose.normal,
+            tangent});
+        searchBegin = matchedIndex;
+    }
+    return hits;
+}
+
 std::uint32_t findNearestAllowedEndpointPose(
     const VoxelGrid& grid,
     const voxel_planner::Point3D& point,
@@ -1003,18 +1125,38 @@ ProcessedMap loadMap(
     const std::string& filepath,
     float width,
     float thickness) {
+    PlannerConfig defaultConfig;
+    return loadMap(
+        filepath,
+        width,
+        thickness,
+        defaultConfig.flat_bend_factor,
+        defaultConfig.vertical_bend_factor);
+}
+
+ProcessedMap loadMap(
+    const std::string& filepath,
+    float width,
+    float thickness,
+    float flat_bend_factor,
+    float vertical_bend_factor) {
     if (filepath.empty()) {
         throw std::invalid_argument("Map filepath must not be empty.");
     }
     if (!std::isfinite(width) || width <= 0.0F ||
-        !std::isfinite(thickness) || thickness <= 0.0F) {
+        !std::isfinite(thickness) || thickness <= 0.0F ||
+        !std::isfinite(flat_bend_factor) || flat_bend_factor <= 0.0F ||
+        !std::isfinite(vertical_bend_factor) ||
+        vertical_bend_factor <= 0.0F) {
         throw std::invalid_argument(
-            "Busbar width and thickness must be finite and positive.");
+            "Busbar dimensions and bend factors must be finite and positive.");
     }
 
     PlannerConfig config;
     config.busbar_width = width;
     config.busbar_thickness = thickness;
+    config.flat_bend_factor = flat_bend_factor;
+    config.vertical_bend_factor = vertical_bend_factor;
     if (!hasPositiveConfiguration(config)) {
         throw std::invalid_argument(
             "Physical busbar dimensions, bend factors, and angle step must "
@@ -1100,8 +1242,9 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         start,
         goal,
         max_paths,
-        EndpointPose{},
-        EndpointPose{});
+        TerminalConstraints{},
+        std::vector<WaypointConstraint>{},
+        CoarseSearchLimits{});
 }
 
 std::pair<PlanStatus, std::vector<PathResult>> findPaths(
@@ -1111,6 +1254,29 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     int max_paths,
     const EndpointPose& start_pose,
     const EndpointPose& end_pose) {
+    TerminalConstraints terminal;
+    terminal.start_normal = start_pose.normal;
+    terminal.start_tangent = start_pose.tangent;
+    terminal.end_normal = end_pose.normal;
+    terminal.end_tangent = end_pose.tangent;
+    return findPaths(
+        map,
+        start,
+        goal,
+        max_paths,
+        terminal,
+        std::vector<WaypointConstraint>{},
+        CoarseSearchLimits{});
+}
+
+std::pair<PlanStatus, std::vector<PathResult>> findPaths(
+    const ProcessedMap& map,
+    const Point3D& start,
+    const Point3D& goal,
+    int max_paths,
+    const TerminalConstraints& terminal_constraints,
+    const std::vector<WaypointConstraint>& waypoint_constraints,
+    const CoarseSearchLimits& coarse_limits) {
     if (!map.impl_) {
         throw std::invalid_argument(
             "ProcessedMap is empty or has been moved from.");
@@ -1118,12 +1284,25 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     if (max_paths <= 0) {
         throw std::invalid_argument("max_paths must be positive.");
     }
-    EndpointConstraint constraint;
-    constraint.start_normal = start_pose.normal;
-    constraint.start_tangent = start_pose.tangent;
-    constraint.end_normal = end_pose.normal;
-    constraint.end_tangent = end_pose.tangent;
-    validateEndpointConstraint(constraint);
+    const EndpointConstraint constraint =
+        toEndpointConstraint(terminal_constraints);
+    const EndpointPose start_pose{
+        constraint.start_normal,
+        constraint.start_tangent};
+    const EndpointPose end_pose{
+        constraint.end_normal,
+        constraint.end_tangent};
+    for (const WaypointConstraint& waypoint : waypoint_constraints) {
+        if (waypoint.tolerance < 0) {
+            throw std::invalid_argument(
+                "Waypoint tolerance must be non-negative.");
+        }
+        Vector3D normalizedTangent{};
+        if (!normalizeVector(waypoint.tangent, normalizedTangent)) {
+            throw std::invalid_argument(
+                "Waypoint tangent must be a finite non-zero vector.");
+        }
+    }
     constexpr float kEndpointImmunityRadius = 15.0F;
     const Point3D internalStart =
         addOffset(start, map.impl_->morphologyOffset);
@@ -1342,7 +1521,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
     }
 
     std::vector<std::vector<Point3D>> topologyHintsInternal;
-    topologyHintsInternal.reserve(jumpPaths.size());
+    topologyHintsInternal.reserve(jumpPaths.size() + 1U);
     for (std::size_t pathIndex = 0U;
          pathIndex < jumpPaths.size();
          ++pathIndex) {
@@ -1408,6 +1587,26 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
             topologyHintsInternal.push_back(std::move(projection.points));
         }
     }
+    if (!waypoint_constraints.empty()) {
+        std::vector<Point3D> waypointHint;
+        appendContinuous26(waypointHint, safeStart);
+        for (const WaypointConstraint& waypoint : waypoint_constraints) {
+            const Point3D internalWaypoint =
+                addOffset(waypoint.point, map.impl_->morphologyOffset);
+            if (!map.impl_->grid.isValid(
+                    internalWaypoint.x,
+                    internalWaypoint.y,
+                    internalWaypoint.z)) {
+                throw std::invalid_argument(
+                    "Waypoint constraint is outside the voxel map.");
+            }
+            appendContinuous26(waypointHint, internalWaypoint);
+        }
+        appendContinuous26(waypointHint, safeGoal);
+        topologyHintsInternal.insert(
+            topologyHintsInternal.begin(),
+            std::move(waypointHint));
+    }
     logProfileMessage(
         "SE3 fallback triggered=true; topology_hints=" +
         std::to_string(topologyHintsInternal.size()));
@@ -1463,6 +1662,14 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 static_cast<double>(requestedPaths));
             return std::max<std::size_t>(150000U, adaptiveLimit);
         };
+    const auto applyCoarseLimit = [&](std::size_t adaptiveLimit) {
+        if (coarse_limits.max_expansions_per_stage == 0U) {
+            return adaptiveLimit;
+        }
+        return std::min(
+            adaptiveLimit,
+            coarse_limits.max_expansions_per_stage);
+    };
     const auto runCoarseSearch =
         [&](const ResolvedEndpoint& searchStart,
             const ResolvedEndpoint& searchGoal,
@@ -1484,10 +1691,10 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 maxExpansionsOverride);
         };
     const std::size_t primaryCoarseExpansionLimit =
-        adaptiveCoarseExpansionLimit(
+        applyCoarseLimit(adaptiveCoarseExpansionLimit(
             topologyHintsInternal.empty()
                 ? nullptr
-                : &topologyHintsInternal.front());
+                : &topologyHintsInternal.front()));
     if (topologyHintsInternal.empty()) {
         logProfileMessage(
             "Adaptive coarse expansion limit=" +
@@ -1540,10 +1747,10 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
             " additional paths.");
         const auto fallbackStart = ProfileClock::now();
         const std::size_t fallbackMaxExpansions =
-            adaptiveFallbackExpansionLimit(
+            applyCoarseLimit(adaptiveFallbackExpansionLimit(
                 selectedPoseStart,
                 selectedPoseGoal,
-                max_paths);
+                max_paths));
         logProfileMessage(
             "Adaptive fallback expansion limit=" +
             std::to_string(fallbackMaxExpansions));
@@ -1629,10 +1836,10 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 snappedGoal,
                 nullptr,
                 true,
-                adaptiveFallbackExpansionLimit(
+                applyCoarseLimit(adaptiveFallbackExpansionLimit(
                     snappedStart,
                     snappedGoal,
-                    max_paths));
+                    max_paths)));
             const std::size_t snappedResultCount = snappedResult.paths.size();
             if (snappedResultCount != 0U) {
                 selectedPoseStart = snappedStart;
@@ -1812,6 +2019,23 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                     described,
                     path.pose_description);
             }
+            path.centerline_poses.resize(path.path.size());
+            for (std::size_t index = 0U;
+                 index < path.centerline_poses.size();
+                 ++index) {
+                const bool useGoalPose = index >= safeGoalPathIndex;
+                path.centerline_poses[index] = {
+                    useGoalPose ? goalNormal : startNormal,
+                    useGoalPose ? goalTangent : startTangent,
+                    index};
+            }
+            for (const PoseDescription& description :
+                 path.pose_description) {
+                if (description.path_index < path.centerline_poses.size()) {
+                    path.centerline_poses[description.path_index] =
+                        description;
+                }
+            }
             translatePathToPublicCoordinates(
                 path.path,
                 map.impl_->morphologyOffset);
@@ -1823,6 +2047,10 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 path.path.front() = start;
                 path.path.back() = goal;
             }
+            path.waypoint_hits = findOrderedWaypointHits(
+                path.path,
+                path.centerline_poses,
+                waypoint_constraints);
             paths.push_back(std::move(path));
         }
         std::sort(
@@ -1840,6 +2068,40 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         return {PlanStatus::OK, std::move(paths)};
     }
     throw std::runtime_error(result.message);
+}
+
+bool isPoseAllowed(
+    const ProcessedMap& map,
+    const Point3D& point,
+    const Vector3D& normal,
+    const Vector3D& tangent) {
+    if (!map.impl_) {
+        throw std::invalid_argument(
+            "ProcessedMap is empty or has been moved from.");
+    }
+    Vector3D normalizedTangent{};
+    if (!normalizeVector(tangent, normalizedTangent)) {
+        throw std::invalid_argument(
+            "Pose tangent must be a finite non-zero vector.");
+    }
+    const Vector3D normalizedNormal =
+        normalizeOrFallbackNormal(normal, normalizedTangent);
+    const Point3D internalPoint =
+        addOffset(point, map.impl_->morphologyOffset);
+    if (!map.impl_->grid.isValid(
+            internalPoint.x,
+            internalPoint.y,
+            internalPoint.z)) {
+        return false;
+    }
+    const std::uint32_t poseId = findNearestAllowedEndpointPose(
+        map.impl_->grid,
+        internalPoint,
+        normalizedNormal,
+        normalizedTangent,
+        map.impl_->poses,
+        true);
+    return poseId != std::numeric_limits<std::uint32_t>::max();
 }
 
 } // namespace voxel_planner
