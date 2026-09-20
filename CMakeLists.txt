@@ -26,6 +26,8 @@ endforeach()
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 
 add_library(voxel_planner STATIC
+    src/environment/SdfVolume.cpp
+    src/optimizer/SqpProjector.cpp
     src/PoseGenerator.cpp
     src/PoseMaskPopulation.cpp
     src/VoxelMorphologyEngine.cpp
@@ -62,3 +64,40 @@ endfunction()
 add_voxel_planner_cli(simulate_caller)
 add_voxel_planner_cli(benchmark_runner)
 add_voxel_planner_cli(busbar_example)
+
+enable_testing()
+
+add_executable(test_sdf tests/test_sdf.cpp)
+target_link_libraries(test_sdf PRIVATE voxel_planner)
+target_include_directories(test_sdf
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_compile_features(test_sdf PRIVATE cxx_std_17)
+target_compile_options(test_sdf PRIVATE
+    $<$<CONFIG:Release>:$<$<CXX_COMPILER_ID:MSVC>:/O2>>
+    $<$<CONFIG:Release>:$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-O3>>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra;-Wpedantic>
+)
+add_test(NAME test_sdf COMMAND test_sdf)
+
+add_executable(test_elastic_band tests/test_elastic_band.cpp)
+target_link_libraries(test_elastic_band PRIVATE voxel_planner)
+target_include_directories(test_elastic_band
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+target_compile_features(test_elastic_band PRIVATE cxx_std_17)
+target_compile_options(test_elastic_band PRIVATE
+    $<$<CONFIG:Release>:$<$<CXX_COMPILER_ID:MSVC>:/O2>>
+    $<$<CONFIG:Release>:$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-O3>>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra;-Wpedantic>
+)
+add_test(NAME test_elastic_band COMMAND test_elastic_band)
+
+add_executable(generate_dataset src/tools/DatasetGenerator.cpp)
+target_link_libraries(generate_dataset PRIVATE voxel_planner)
+target_include_directories(generate_dataset
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+)

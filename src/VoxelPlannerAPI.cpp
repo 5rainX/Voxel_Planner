@@ -6,6 +6,9 @@
 #include "Module3_AStar/CoarseAStar.h"
 #include "Module3_AStar/JumpAStar.h"
 #include "Module2_Morphology/PoseGenerator.h"
+#include "environment/SdfVolume.h"
+#include "optimizer/SqpProjector.h"
+#include "optimizer/Trajectory.h"
 
 #include <algorithm>
 #include <chrono>
@@ -13,6 +16,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -723,6 +727,78 @@ void appendPublicConditionalPose(
     }
     descriptions.push_back({normal, tangent, waypointIndex});
     described[waypointIndex] = true;
+}
+
+std::vector<voxel_planner::WaypointHit> findOrderedWaypointHits(
+    const std::vector<voxel_planner::Point3D>& path,
+    const std::vector<voxel_planner::PoseDescription>& centerlinePoses,
+    const std::vector<voxel_planner::WaypointConstraint>& constraints);
+
+voxel_planner::Vector3D toPublicVector(
+    const environment::Vec3& value) {
+    return {value.x, value.y, value.z};
+}
+
+void applyElasticBandProjection(
+    const environment::GlobalSdf& sdf,
+    voxel_planner::PathResult& path,
+    const voxel_planner::Point3D& publicStart,
+    const voxel_planner::Point3D& publicGoal,
+    const std::vector<voxel_planner::WaypointConstraint>& waypointConstraints,
+    double busbarWidth,
+    double busbarThickness,
+    double maxCurvature) {
+    if (path.path.size() <= 2U) {
+        return;
+    }
+
+    optimizer::ConfigurationSpaceRefiner refiner;
+    const optimizer::PoseTrajectory initial =
+        refiner.fromVoxelPath(path.path);
+    optimizer::SqpProjectorOptions options;
+    options.safe_margin = 1.0;
+    options.busbar_width = busbarWidth;
+    options.busbar_thickness = busbarThickness;
+    options.max_curvature = maxCurvature;
+    options.max_iterations = 60;
+    options.initial_step = 0.08;
+    const optimizer::SqpProjector projector(options);
+    const optimizer::SqpProjectorResult projected =
+        projector.project(initial, sdf);
+    if (!projected.success || projected.trajectory.size() != initial.size()) {
+        return;
+    }
+
+    std::vector<voxel_planner::Point3D> optimizedPath =
+        refiner.toVoxelPath(projected.trajectory);
+    if (optimizedPath.empty()) {
+        return;
+    }
+    optimizedPath.front() = publicStart;
+    optimizedPath.back() = publicGoal;
+
+    optimizer::PoseTrajectory poseTrajectory =
+        refiner.fromVoxelPath(optimizedPath, false);
+    if (!projector.satisfiesHardConstraints(poseTrajectory, sdf)) {
+        return;
+    }
+    poseTrajectory.recomputeFrames();
+    path.path = std::move(optimizedPath);
+    path.centerline_poses.clear();
+    path.centerline_poses.reserve(poseTrajectory.size());
+    for (std::size_t index = 0U;
+         index < poseTrajectory.size();
+         ++index) {
+        path.centerline_poses.push_back({
+            toPublicVector(poseTrajectory[index].normal),
+            toPublicVector(poseTrajectory[index].tangent),
+            index});
+    }
+    path.pose_description = path.centerline_poses;
+    path.waypoint_hits = findOrderedWaypointHits(
+        path.path,
+        path.centerline_poses,
+        waypointConstraints);
 }
 
 bool isInsideWaypointTolerance(
@@ -1913,6 +1989,7 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
         const auto conversionStart = ProfileClock::now();
         std::vector<PathResult> paths;
         paths.reserve(result.paths.size());
+        std::unique_ptr<environment::GlobalSdf> elasticBandSdf;
         for (::PathResult& internalPath : result.paths) {
             if (internalPath.path.empty() ||
                 !(internalPath.path.front() == safeStart) ||
@@ -2046,6 +2123,43 @@ std::pair<PlanStatus, std::vector<PathResult>> findPaths(
                 // back from the expanded morphology grid.
                 path.path.front() = start;
                 path.path.back() = goal;
+            }
+            try {
+                if (!elasticBandSdf) {
+                    elasticBandSdf =
+                        std::make_unique<environment::GlobalSdf>(
+                            map.impl_->rawGrid);
+                }
+                applyElasticBandProjection(
+                    *elasticBandSdf,
+                    path,
+                    start,
+                    goal,
+                    waypoint_constraints,
+                    static_cast<double>(map.impl_->config.busbar_width),
+                    static_cast<double>(map.impl_->config.busbar_thickness),
+                    1.0 / std::min(
+                        static_cast<double>(
+                            map.impl_->config.flat_bend_factor) *
+                            static_cast<double>(
+                                map.impl_->config.busbar_thickness),
+                        static_cast<double>(
+                            map.impl_->config.vertical_bend_factor) *
+                            static_cast<double>(
+                                map.impl_->config.busbar_width)));
+                path.cost = 0.0;
+                for (std::size_t index = 1U;
+                     index < path.path.size();
+                     ++index) {
+                    path.cost += pointDistance(
+                        path.path[index - 1U],
+                        path.path[index]);
+                }
+            } catch (const std::exception& error) {
+                logProfileMessage(
+                    std::string(
+                        "[WARNING] Elastic band projection skipped: ") +
+                    error.what());
             }
             path.waypoint_hits = findOrderedWaypointHits(
                 path.path,
