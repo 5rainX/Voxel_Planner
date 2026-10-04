@@ -4,3 +4,4 @@ lib/
 .vscode/
 *.vtk
 *.obj binary
+dataset_outputs/

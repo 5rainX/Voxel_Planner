@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Path Transformer Dataset V1 sample",
+  "type": "object",
+  "required": ["schema_version", "sample_id", "provenance", "environment", "busbar", "start", "goal", "coarse_path", "reference", "targets", "validation"],
+  "properties": {
+    "schema_version": {"const": "path_transformer_dataset_v1"},
+    "sample_id": {"type": "string", "minLength": 1},
+    "provenance": {"type": "object", "required": ["source", "source_file", "source_line", "source_sample_id", "scene_id", "map_id", "map_file", "generator_version", "reference_type"]},
+    "environment": {"type": "object", "required": ["map_sha256", "sdf_artifact", "sdf_artifact_sha256", "sdf_shape_zyx", "origin", "voxel_size", "layout", "dtype", "sdf_valid", "empty_map_sentinel"]},
+    "busbar": {"type": "object", "required": ["width", "thickness", "units"]},
+    "start": {"type": "object", "required": ["position"]},
+    "goal": {"type": "object", "required": ["position"]},
+    "coarse_path": {"type": "array", "minItems": 2, "items": {"type": "object", "required": ["position", "tangent", "normal", "binormal", "s_normalized", "sdf"]}},
+    "reference": {"type": "object", "required": ["source", "role", "independent_geometry_validation", "global_optimality_proven", "centerline", "aligned_centerline", "source_segment_types"]},
+    "targets": {"type": "array", "minItems": 2, "items": {"type": "object", "required": ["du", "dv", "theta", "theta_valid", "longitudinal_residual"], "properties": {"theta": {"type": ["number", "null"]}, "theta_valid": {"type": "boolean"}}}},
+    "validation": {"type": "object", "required": ["geometry_label_valid", "full_feature_valid", "endpoint_mismatch_voxel", "coarse_length_voxel", "reference_length_voxel", "alignment_offset_voxel", "reconstruction_error_voxel", "longitudinal_residual_abs_voxel", "theta_valid_count", "sdf_invalid_query_count", "quality_threshold_voxel"]}
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Reference Geometry V1",
+  "type": "object",
+  "required": ["sample_id", "reference_geometry_version", "status", "source"],
+  "properties": {
+    "sample_id": {"type": "string", "minLength": 1},
+    "reference_geometry_version": {"const": "reference_geometry_v1"},
+    "status": {"enum": ["VALID", "UNRECOVERABLE"]},
+    "source": {"type": "object"},
+    "reason": {"type": "string"},
+    "reference_centerline": {"type": "array", "minItems": 2},
+    "reference_poses": {"type": "array", "minItems": 2,
+      "items": {"type": "object", "required": ["position", "tangent", "normal", "binormal", "orientation_valid", "segment_index", "segment_type", "s_voxel", "s_normalized"]}},
+    "segments": {"type": "array", "minItems": 1,
+      "items": {"type": "object", "required": ["segment_index", "segment_type", "start_index", "end_index", "geometry_source", "geometry_reconstruction_method", "orientation_source"]}},
+    "validation": {"type": "object", "required": ["point_count", "length_voxel", "max_spacing_voxel", "max_junction_position_error_voxel", "max_junction_tangent_discontinuity_deg", "orientation_valid_nodes", "sampling_rule"]}
+  }
+}
