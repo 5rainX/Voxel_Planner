@@ -1,0 +1,4 @@
+success=false
+fine_elapsed_ms=4.1901
+attempts=1
+message=Cannot generate valid initial segments in any direction

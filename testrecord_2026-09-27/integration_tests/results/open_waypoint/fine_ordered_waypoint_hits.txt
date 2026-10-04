@@ -1,0 +1,4 @@
+# representative voxel inside each hit AABB; hard constraint uses continuous centerline/AABB intersection
+# tangent_tolerance_deg 3 min_directed_dot 0.99863
+# index x y z required_tx required_ty required_tz
+0 23 16 12 1 0 0

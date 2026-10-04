@@ -1,0 +1,8 @@
+status=OK
+elapsed_ms=19.0234
+cost=32.8284
+path_voxels=33
+waypoints=2
+conditional_poses=0
+centerline_poses=33
+ordered_waypoint_hits=0

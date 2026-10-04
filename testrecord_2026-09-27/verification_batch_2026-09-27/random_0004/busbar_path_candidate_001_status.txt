@@ -1,0 +1,4 @@
+success=true
+fine_elapsed_ms=11.8766
+attempts=1
+message=Path found (via VERTICAL_BEND fillet)! Iterations: 16 | Explored: 10 | Generated: 75 | Pruned: 0 | Cost: 37.5693

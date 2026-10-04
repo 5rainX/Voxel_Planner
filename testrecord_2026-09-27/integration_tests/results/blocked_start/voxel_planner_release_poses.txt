@@ -1,0 +1,1 @@
+# path_index nx ny nz tx ty tz

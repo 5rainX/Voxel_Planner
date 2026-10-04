@@ -1,0 +1,112 @@
+=== 3D Busbar Router - Path Planning Mode ===
+Map file: input.txt
+Header: map: 48 32 24
+Total voxels: 36864
+Loaded obstacles: 0, collision_voxels: 0
+TXT Load Time: 0 ms
+Endpoint tangent portfolio: 1 continuous fine pair(s) -> 1 unique directed-26 coarse pair(s).
+  coarse group 1 start=(1, 0, 0) goal=(1, 0, 0) reuses=1 fine pair(s): 1
+Coarse max expansions per ordered stage (request): 100000
+Debug output directory: "E:\\Learning\\Subjects\\Â·¾¶Éú³É\\VP\\Voxel_Planner\\weekly_2026-09-27\\verification_2026-09-27\\open_straight\\debug_output"
+
+=== Run Parameters ===
+Start: (8, 16, 12), Goal: (40, 16, 12)
+Start normal: (0, 0, 1), Goal normal: (0, 0, 1)
+Specified start tangent: (1, 0, 0), Specified goal tangent: (1, 0, 0)
+Endpoint tangent candidates (continuous in fine planning; grouped by directed-26 tangents in coarse planning):
+  [0] rotations=(0, 0) deg start=(1, 0, 0) goal=(1, 0, 0) coarse_start=(1, 0, 0) coarse_goal=(1, 0, 0)
+Width=2, Thickness=1, Clearance=0
+Heuristic=3, FlatBendFactor=1, VerticalBendFactor=1, TwistFactor=1, BendFactor=1
+AxisAlignedStraightCostFactor=0.8 (axis threshold=0.999)
+MinBeginLength=1, MinEndLength=1
+Disabled segments: BEND_45
+SmartPlatform=ON, StartEndpoint=PLATFORM, GoalEndpoint=PLATFORM, DisableCoarse=OFF, VoxelPreprocess=OFF, VoxelPlannerRelease=ON, ReleaseInitialPath=ON, AStarJumpInitialPath=OFF, ViaGuideOnly=OFF, CoarsePathsPerTangent=1, CoarseOBJ=ON, CoarseOnly=OFF, FineOnProcessedMap=OFF, ProcessedMapWithGuide=OFF, Debug=OFF, DebugVoxel=OFF, RawOutput=OFF, MaxTime=5 s
+Mandatory region: OFF
+
+Planning from (8, 16, 12) to (40, 16, 12)
+Debug mode: DISABLED
+
+=== Standalone Voxel_Planner_Release preprocessing ===
+Coarse bend factors synchronized with fine planning: flat=1 (radius=1), vertical=1 (radius=2)
+[PROBE] I/O Text Parsing: 3.7973 ms
+[PROBE] Morphology Build: 0.781 ms
+[PROBE] Pose Mask Population (lazy setup): 0.1058 ms
+Voxel preprocessing completed once and will be reused by all tangent candidates: 4.7486 ms
+
+[Coarse quantized tangent group 1/1] start=(1, 0, 0) goal=(1, 0, 0) shared_by=1 continuous fine pair(s)
+[VoxelPlannerAPI::findPaths] request start=(8, 16, 12), goal=(40, 16, 12), max_paths=1
+[VoxelPlannerAPI::findPaths] BEGIN SE3 endpoint resolution
+[VoxelPlannerAPI::findPaths] END SE3 endpoint resolution: 0.0216 ms, 21600 ns
+[VoxelPlannerAPI::findPaths] SE3 safe_start=(10, 16, 12), start_pose=312, safe_goal=(40, 16, 12), goal_pose=312
+[VoxelPlannerAPI::findPaths] Jump physical roots: start=(9, 16, 12), goal=(39, 16, 12)
+[VoxelPlannerAPI::findPaths] BEGIN JumpAStar::findPaths
+[VoxelPlannerAPI::findPaths] END JumpAStar::findPaths: 0.0255 ms, 25500 ns
+[VoxelPlannerAPI::findPaths] JumpAStar paths=1
+[VoxelPlannerAPI::findPaths] JumpAStar path[0] points=31
+[VoxelPlannerAPI::findPaths] Projected JumpAStar hint[0] onto expanded grid; source_points=31, output_points=31, success_rate=100.000000%, snapped_points=0, filled_points=0, corrected_points=0
+[VoxelPlannerAPI::findPaths] SE3 fallback triggered=true; topology_hints=1
+[VoxelPlannerAPI::findPaths] Topology hint[0] points=31
+[VoxelPlannerAPI::findPaths] BEGIN CoarseAStar::findPaths; internal work includes action catalog, backward voxel BFS, swept-volume validation, and diversity retries
+[VoxelPlannerAPI::findPaths] Adaptive coarse expansion limit=50000 (hint_len=31)
+[VoxelPlannerAPI::findPaths] END CoarseAStar::findPaths total: 15.2245 ms, 15224500 ns
+[VoxelPlannerAPI::findPaths] CoarseAStar status=0, error_code=0, internal_paths=1, message=Generated 1 lightweight path(s).
+[VoxelPlannerAPI::findPaths] BEGIN SE3 public result conversion
+[VoxelPlannerAPI::findPaths] END SE3 public result conversion: 0.1052 ms, 105200 ns
+[VoxelPlannerAPI::findPaths] returning SE3 paths=1
+  Unique coarse route 1: 33 voxels -> 2 waypoints, physical_length=32, cost=32, request_elapsed=15.5197 ms
+    Fine guide candidate 1 maps fine pair 1 onto coarse route 1
+
+Coarse portfolio statistics: fine_tangent_pairs=1, quantized_tangent_groups=1, findPaths_calls=1, unique_coarse_routes=1, coarse_fine_combinations=1, findPaths_total_ms=15.5197
+
+=== Fine candidate 1/1 ===
+Fine endpoint tangents: start=(1, 0, 0), goal=(1, 0, 0); coarse group=1 quantized_start=(1, 0, 0) quantized_goal=(1, 0, 0); guide voxels=33; fine vias=HARD
+Heuristic weight (active): 3
+  [Smart] Platform surface detected at level 11 (votes: 0/4)
+  [Smart] Platform surface detected at level 11 (votes: 0/4)
+Expanding start platform: 289 voxels...Expanding start platform: surface_voxels=289 -> expanded_voxels=935
+Expanding goal platform: 272 voxels...Expanding goal platform: surface_voxels=272 -> expanded_voxels=882
+SmartPlatform: platform detection enabled; preserving input endpoint centers
+Endpoint centers: input_start=(8, 16, 12), input_goal=(40, 16, 12), actual_start=(8, 16, 12), actual_goal=(40, 16, 12)
+  [TerminalRecovery] reverse terminal ports=61 (collision-validated direct/flat targets)
+
+=== Phase 1: Voxel-level coarse planning (dist=32) ===
+  External Voxel_Planner_Release guide accepted: 33 voxels -> 2 waypoints
+  External-guide tangent transition margin=2 (base corridor=12)
+=== Phase 2: Building corridor (radius=14) ===
+  Corridor built: radius=14 sampled=6/33 marked=26587 voxels (0.0685 ms)
+  Coarse path guidance: 2 waypoints, total length=32
+
+=== Phase 3: Fine A* planning ===
+  [BFS] C-space inflation done (half_cross=1)
+  Goal BFS distance field built: 3.2025 ms, reached=36864/36864, start_dist=32
+Generating initial candidates... done (7 candidates, 0.0732 ms)
+  [HybridState] exact_key_bytes=80, record_value_bytes=104, queue_node_bytes=88, connectivity_cap=8, max_records=unlimited
+Starting A* search (iteration limit: disabled, timeout: 5s)...
+  [DualQueue] phases=legacy-fast -> bounded-terminal(probe:other=1:4, live-ready-waypoint=4:1) -> dual(pose:legacy=4:1, pose-buckets 16 -> 32), representatives_per_bucket=2, internal_budget=disabled(explicit --max-time)
+  [PosePrune] phase=legacy-fast, legacy_deferrals=0, position_deferrals=0, representative_prunes=0, promoted_legacy=0, promoted_pose=0, legacy_pops=1, pose_pops=0, terminal_pops=0, advanced_pose_expansions=0, advanced_pose_new_g=0, advanced_pose_adoptions=0, advanced_pose_limiter_rejects=0, terminal_admitted=6, connectivity_accepts=6, connectivity_rejects=1, connectivity_stale=0, connectivity_live=6, connectivity_poses=6, records=7, legacy_open=5, pose_open=0, terminal_open=6, deferred_remaining=0
+Path exported to busbar_path_candidate_001.txt
+Path surface exported to busbar_path_candidate_001.obj (66 voxels, 202 exposed quads, 808 vertices)
+Fine candidate 1: SUCCESS, elapsed=13.9381 ms, bends=0, length=32, cost=25.6
+[POST] planner returned, starting result reporting...
+
+=== Planning Result ===
+Success: YES
+Planning Time: 44 ms
+Message: Path found! Iterations: 1 | Explored: 1 | Generated: 0 | Pruned: 0 | Segments: 1 | Cost: 25.6
+
+=== Search Statistics ===
+States generated: 0
+States explored: 1
+States pruned: 0
+Corrected endpoints: actual_start=(8, 16, 12), actual_goal=(40, 16, 12)
+Directed endpoint normals: actual_start=(0, 0, 1), actual_goal=(0, 0, 1)
+Number of segments: 1
+Total cost: 25.6
+
+Segment sequence:
+  0: STRAIGHT (length=32, cost=25.6)
+[POST] exporting final path files...
+Path exported to busbar_path.txt
+Path surface exported to busbar_path.obj (66 voxels, 202 exposed quads, 808 vertices)
+[POST] final path files export finished.
+[POST] runPathPlanning finished.

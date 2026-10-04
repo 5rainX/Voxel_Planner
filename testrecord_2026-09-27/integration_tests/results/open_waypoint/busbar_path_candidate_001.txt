@@ -1,0 +1,70 @@
+# Busbar Path Export
+# Width: 2
+# Thickness: 1
+
+Segment 0:
+  Type: STRAIGHT
+  Start: (8, 16, 12)
+  End: (22, 16, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (1, 0, 0)
+  End Tangent: (1, 0, 0)
+  Angle: 0
+  Length: 14
+  Cost: 11.2
+
+Segment 1:
+  Type: TWIST
+  Start: (22, 16, 12)
+  End: (24, 16, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, -1, -4.37114e-08)
+  Start Tangent: (1, 0, 0)
+  End Tangent: (1, 0, 0)
+  Angle: 0
+  Length: 2
+  Cost: 2.76
+
+Segment 2:
+  Type: STRAIGHT
+  Start: (24, 16, 12)
+  End: (36, 16, 12)
+  Start Normal: (0, -1, -4.37114e-08)
+  End Normal: (0, -1, -4.37114e-08)
+  Start Tangent: (1, 0, 0)
+  End Tangent: (1, 0, 0)
+  Angle: 0
+  Length: 12
+  Cost: 9.6
+
+Segment 3:
+  Type: TWIST
+  Start: (36, 16, 12)
+  End: (38, 16, 12)
+  Start Normal: (0, -1, -4.37114e-08)
+  End Normal: (0, 8.74228e-08, -1)
+  Start Tangent: (1, 0, 0)
+  End Tangent: (1, 0, 0)
+  Angle: 0
+  Length: 2
+  Cost: 2.76
+
+Segment 4:
+  Type: STRAIGHT
+  Start: (38, 16, 12)
+  End: (40, 16, 12)
+  Start Normal: (0, 8.74228e-08, -1)
+  End Normal: (0, 8.74228e-08, -1)
+  Start Tangent: (1, 0, 0)
+  End Tangent: (1, 0, 0)
+  Angle: 0
+  Length: 2
+  Cost: 1.6
+
+# Summary
+#   Segments: 5
+#   Bends: 2
+#   Total Length: 32
+#   Total Cost: 27.92
+#   Total Bend Angle: 0 rad

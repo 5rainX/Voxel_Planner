@@ -1,0 +1,62 @@
+=== 3D Busbar Router - Path Planning Mode ===
+Map file: input.txt
+Header: map: 48 32 24
+Total voxels: 36864
+Loaded obstacles: 768, collision_voxels: 0
+TXT Load Time: 0 ms
+Endpoint tangent portfolio: 1 continuous fine pair(s) -> 1 unique directed-26 coarse pair(s).
+  coarse group 1 start=(1, 0, 0) goal=(1, 0, 0) reuses=1 fine pair(s): 1
+Coarse max expansions per ordered stage (request): 100000
+Debug output directory: "E:\\Learning\\Subjects\\Â·¾¶Éú³É\\VP\\Voxel_Planner\\weekly_2026-09-27\\verification_2026-09-27\\blocked_wall\\debug_output"
+
+=== Run Parameters ===
+Start: (8, 16, 12), Goal: (40, 16, 12)
+Start normal: (0, 0, 1), Goal normal: (0, 0, 1)
+Specified start tangent: (1, 0, 0), Specified goal tangent: (1, 0, 0)
+Endpoint tangent candidates (continuous in fine planning; grouped by directed-26 tangents in coarse planning):
+  [0] rotations=(0, 0) deg start=(1, 0, 0) goal=(1, 0, 0) coarse_start=(1, 0, 0) coarse_goal=(1, 0, 0)
+Width=2, Thickness=1, Clearance=0
+Heuristic=3, FlatBendFactor=1, VerticalBendFactor=1, TwistFactor=1, BendFactor=1
+AxisAlignedStraightCostFactor=0.8 (axis threshold=0.999)
+MinBeginLength=1, MinEndLength=1
+Disabled segments: BEND_45
+SmartPlatform=ON, StartEndpoint=PLATFORM, GoalEndpoint=PLATFORM, DisableCoarse=OFF, VoxelPreprocess=OFF, VoxelPlannerRelease=ON, ReleaseInitialPath=ON, AStarJumpInitialPath=OFF, ViaGuideOnly=OFF, CoarsePathsPerTangent=1, CoarseOBJ=ON, CoarseOnly=OFF, FineOnProcessedMap=OFF, ProcessedMapWithGuide=OFF, Debug=OFF, DebugVoxel=OFF, RawOutput=OFF, MaxTime=5 s
+Mandatory region: OFF
+
+Planning from (8, 16, 12) to (40, 16, 12)
+Debug mode: DISABLED
+
+=== Standalone Voxel_Planner_Release preprocessing ===
+Coarse bend factors synchronized with fine planning: flat=1 (radius=1), vertical=1 (radius=2)
+[PROBE] I/O Text Parsing: 3.9201 ms
+[PROBE] Morphology Build: 0.8 ms
+[PROBE] Pose Mask Population (lazy setup): 0.1061 ms
+Voxel preprocessing completed once and will be reused by all tangent candidates: 4.9329 ms
+
+[Coarse quantized tangent group 1/1] start=(1, 0, 0) goal=(1, 0, 0) shared_by=1 continuous fine pair(s)
+[VoxelPlannerAPI::findPaths] request start=(8, 16, 12), goal=(40, 16, 12), max_paths=1
+[VoxelPlannerAPI::findPaths] BEGIN SE3 endpoint resolution
+[VoxelPlannerAPI::findPaths] END SE3 endpoint resolution: 0.0185 ms, 18500 ns
+[VoxelPlannerAPI::findPaths] SE3 safe_start=(10, 16, 12), start_pose=312, safe_goal=(40, 16, 12), goal_pose=312
+[VoxelPlannerAPI::findPaths] Jump physical roots: start=(9, 16, 12), goal=(39, 16, 12)
+[VoxelPlannerAPI::findPaths] BEGIN JumpAStar::findPaths
+[VoxelPlannerAPI::findPaths] [WARNING] JumpAStar failed on dilated grid. Retrying on raw grid...
+[VoxelPlannerAPI::findPaths] JumpAStar raw-grid retry paths=0
+[VoxelPlannerAPI::findPaths] END JumpAStar::findPaths: 13.8963 ms, 13896300 ns
+[VoxelPlannerAPI::findPaths] JumpAStar paths=0
+[VoxelPlannerAPI::findPaths] SE3 fallback triggered=true; topology_hints=0
+[VoxelPlannerAPI::findPaths] BEGIN CoarseAStar::findPaths; internal work includes action catalog, backward voxel BFS, swept-volume validation, and diversity retries
+[VoxelPlannerAPI::findPaths] Topology hints unavailable; coarse fallback uses none
+[VoxelPlannerAPI::findPaths] Adaptive coarse expansion limit=50000 (no hint available)
+[VoxelPlannerAPI::findPaths] END CoarseAStar::findPaths total: 32.0539 ms, 32053900 ns
+[VoxelPlannerAPI::findPaths] CoarseAStar status=1, error_code=11, internal_paths=0, message=No feasible 26-neighborhood path exists.
+[VoxelPlannerAPI::findPaths] CoarseAStar produced 0 unique paths; starting fallback full coarse search for 1 additional paths.
+[VoxelPlannerAPI::findPaths] Adaptive fallback expansion limit=100000
+[VoxelPlannerAPI::findPaths] END CoarseAStar fallback full search: 30.9811 ms, 30981100 ns
+[VoxelPlannerAPI::findPaths] Fallback full search result: status=1, error_code=11, paths=0, message=No feasible 26-neighborhood path exists.
+[VoxelPlannerAPI::findPaths] Fallback full search hit corridor rupture or endpoint block; retrying with nearest free-space endpoint roots.
+[VoxelPlannerAPI::findPaths] Fallback endpoint re-snap failed: status=1, error_code=11, message=No feasible 26-neighborhood path exists.
+[VoxelPlannerAPI::findPaths] CoarseAStar fallback added 0 unique paths; total=0/1
+Voxel_Planner_Release returned no guide for this tangent pair after 109.005 ms
+
+Coarse portfolio statistics: fine_tangent_pairs=1, quantized_tangent_groups=1, findPaths_calls=1, unique_coarse_routes=0, coarse_fine_combinations=0, findPaths_total_ms=109.005

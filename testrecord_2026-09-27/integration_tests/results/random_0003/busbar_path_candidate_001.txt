@@ -1,0 +1,22 @@
+# Busbar Path Export
+# Width: 2
+# Thickness: 1
+
+Segment 0:
+  Type: STRAIGHT
+  Start: (8, 19, 12)
+  End: (40, 19, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (1, 0, 0)
+  End Tangent: (1, 0, 0)
+  Angle: 0
+  Length: 32
+  Cost: 25.6
+
+# Summary
+#   Segments: 1
+#   Bends: 0
+#   Total Length: 32
+#   Total Cost: 25.6
+#   Total Bend Angle: 0 rad

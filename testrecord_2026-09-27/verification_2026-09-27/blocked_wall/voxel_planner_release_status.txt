@@ -1,0 +1,8 @@
+status=NO_PATH
+elapsed_ms=4.9329
+message=No coarse guide candidate satisfied the request
+path_voxels=0
+waypoints=0
+conditional_poses=0
+centerline_poses=0
+ordered_waypoint_hits=0

@@ -1,0 +1,87 @@
+{
+  "coarse_status": {
+    "voxel_planner_release_status.txt": {
+      "status": "NO_PATH",
+      "elapsed_ms": "4.9329",
+      "message": "No coarse guide candidate satisfied the request",
+      "path_voxels": "0",
+      "waypoints": "0",
+      "conditional_poses": "0",
+      "centerline_poses": "0",
+      "ordered_waypoint_hits": "0"
+    }
+  },
+  "coarse_errors": [],
+  "candidates": [],
+  "returncode": 1,
+  "accepted_count": 0,
+  "status": "COARSE_NO_PATH",
+  "map": {
+    "shape": [
+      48,
+      32,
+      24
+    ],
+    "listed_voxels": 768
+  },
+  "map_sha256": "be9e71a9b3bb128b2b2aa34f305451b8b548684a380bf089e5318341e35d52ea",
+  "case_id": "blocked_wall",
+  "elapsed_s": 0.15599999999903957,
+  "request": {
+    "id": "blocked_wall",
+    "map": "blocked_wall.txt",
+    "start": [
+      8,
+      16,
+      12
+    ],
+    "goal": [
+      40,
+      16,
+      12
+    ],
+    "args": [
+      "--width",
+      "2",
+      "--thickness",
+      "1",
+      "--clearance",
+      "0",
+      "--min-begin-length",
+      "1",
+      "--min-end-length",
+      "1",
+      "--flat-bend-factor",
+      "1",
+      "--vertical-bend-factor",
+      "1",
+      "--twist-factor",
+      "1",
+      "--bend-factor",
+      "1",
+      "--start-normal",
+      "0",
+      "0",
+      "1",
+      "--end-normal",
+      "0",
+      "0",
+      "1",
+      "--start-tangent",
+      "1",
+      "0",
+      "0",
+      "--end-tangent",
+      "1",
+      "0",
+      "0",
+      "--no-bend45",
+      "--heuristic",
+      "3"
+    ],
+    "family": "blocked",
+    "expected": "COARSE_NO_PATH"
+  },
+  "expected": "COARSE_NO_PATH",
+  "expectation_met": true
+}

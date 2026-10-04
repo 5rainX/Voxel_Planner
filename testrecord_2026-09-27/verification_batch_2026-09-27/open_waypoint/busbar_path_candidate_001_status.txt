@@ -1,0 +1,4 @@
+success=true
+fine_elapsed_ms=10.6442
+attempts=1
+message=Path found (via COMPOSITE twist+fillet)! Iterations: 27 | Explored: 27 | Generated: 144 | Pruned: 0 | Segments: 5 | Cost: 30.7586

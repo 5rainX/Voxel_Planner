@@ -1,0 +1,4 @@
+success=true
+fine_elapsed_ms=11.3178
+attempts=1
+message=Path found! Iterations: 1 | Explored: 1 | Generated: 0 | Pruned: 0 | Segments: 1 | Cost: 25.6

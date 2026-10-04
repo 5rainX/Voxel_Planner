@@ -1,0 +1,94 @@
+# Busbar Path Export
+# Width: 2
+# Thickness: 1
+
+Segment 0:
+  Type: STRAIGHT
+  Start: (8, 17, 12)
+  End: (26, 17, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (1, 0, 0)
+  End Tangent: (1, 0, 0)
+  Angle: 0
+  Length: 18
+  Cost: 14.4
+
+Segment 1:
+  Type: VERTICAL_BEND
+  Start: (26, 17, 12)
+  End: (27, 16, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (1, 0, 0)
+  End Tangent: (0.707107, -0.707107, 0)
+  Angle: -0.785398
+  Length: 1.5708
+  Cost: 2.1677
+
+Segment 2:
+  Type: STRAIGHT
+  Start: (27, 16, 12)
+  End: (28, 15, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (0.707107, -0.707107, 0)
+  End Tangent: (0.707107, -0.707107, 0)
+  Angle: 0
+  Length: 1.41421
+  Cost: 1.41421
+
+Segment 3:
+  Type: VERTICAL_BEND
+  Start: (28, 15, 12)
+  End: (31, 15, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (0.707107, -0.707107, 0)
+  End Tangent: (0.793353, 0.608761, 0)
+  Angle: 1.4399
+  Length: 2.87979
+  Cost: 3.97411
+
+Segment 4:
+  Type: STRAIGHT
+  Start: (31, 15, 12)
+  End: (33, 17, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (0.83205, 0.5547, 0)
+  End Tangent: (0.83205, 0.5547, 0)
+  Angle: 0
+  Length: 2.82843
+  Cost: 2.82843
+
+Segment 5:
+  Type: VERTICAL_BEND
+  Start: (33, 17, 12)
+  End: (35, 17, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (0.894427, 0.447214, -0)
+  End Tangent: (0.992278, -0.124035, 0)
+  Angle: -0.588003
+  Length: 1.17601
+  Cost: 1.62289
+
+Segment 6:
+  Type: STRAIGHT
+  Start: (35, 17, 12)
+  End: (40, 17, 12)
+  Start Normal: (0, 0, 1)
+  End Normal: (0, 0, 1)
+  Start Tangent: (1, 2.98023e-08, 0)
+  End Tangent: (1, 2.98023e-08, 0)
+  Angle: 0
+  Length: 5
+  Cost: 4
+
+# Summary
+#   Segments: 7
+#   Bends: 3
+#   Total Length: 32.8692
+#   Total Cost: 30.4073
+#   Total Bend Angle: 2.8133 rad
