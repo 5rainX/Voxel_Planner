@@ -9,6 +9,23 @@ returns cost-sorted candidate centerlines between two voxel coordinates.
 
 The public, stable interface is declared in `include/VoxelPlannerAPI.h`.
 
+## Fine Planner MVP (P1)
+
+The independent `fine_planner` CMake target constructs deterministic straight
+and explicit circular-arc reference geometry. Its public interface is in
+`include/fine_planner/`; implementation is in `src/fine_planner/`, and maintained
+tests are in `tests/fine_planner/`. Historical evidence under
+`testrecord_2026-09-27/` remains unchanged. See
+[`docs/fine_planner_p1.md`](docs/fine_planner_p1.md) for the geometry contract,
+validation limits, and native Reference Geometry V1 export.
+
+`SqpProjector` remains an optional position smoother. The Fine Planner requires
+explicit arc center, axis, radius and signed sweep; it does not infer bends
+from coarse path endpoints. A separate `GeometryValidator` checks the sampled
+reference and conservative section clearance. This is not a proof of continuous
+full-size collision freedom. The legacy coarse planner interface remains
+unchanged; P1-R1 corrected multi-path diversity and returned physical costs.
+
 ## Prerequisites
 
 - CMake 3.16 or newer

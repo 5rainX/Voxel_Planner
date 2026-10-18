@@ -103,10 +103,12 @@ int main() {
             "Pose-aware A* did not find the 90-degree bend.");
     require(result.paths.size() == 1U,
             "Pose-aware A* returned an unexpected path count.");
-    const double expectedArcLength = 1.5 * 3.14159265358979323846 / 2.0;
-    if (std::abs(result.paths.front().cost - expectedArcLength) >= 1e-5) {
+    // CoarseAStar searches a 26-neighbor voxel lattice. It does not construct
+    // a manufacturing arc; the selected two diagonal steps each cost sqrt(2).
+    const double expectedLatticeLength = 2.0 * std::sqrt(2.0);
+    if (std::abs(result.paths.front().cost - expectedLatticeLength) >= 1e-5) {
         std::cerr << "Actual cost=" << result.paths.front().cost
-                  << " expected=" << expectedArcLength
+                  << " expected=" << expectedLatticeLength
                   << " states=" << result.paths.front().path.size()
                   << "\n";
         for (const Point3D& point : result.paths.front().path) {
@@ -114,32 +116,44 @@ int main() {
                       << point.z << ")\n";
         }
     }
-    require(std::abs(result.paths.front().cost - expectedArcLength) < 1e-5,
-            "Bend cost contains a non-physical penalty.");
-    const Point3D conditionalArcPoint{5, 4, 4};
+    require(std::abs(result.paths.front().cost - expectedLatticeLength) < 1e-5,
+            "Coarse lattice cost differs from the selected step lengths.");
+    // A separate straight request crosses the pose-conditional voxel.
+    // The shortest diagonal route above is not required to visit it.
+    const PlanningResult conditionalResult = module3_astar::CoarseAStar::findPaths(
+        map,
+        PoseState{Point3D{4, 4, 4}, startPoseId},
+        PoseState{Point3D{6, 4, 4}, startPoseId},
+        1,
+        poses,
+        config);
+    require(conditionalResult.status == PlannerStatus::OK &&
+                conditionalResult.paths.size() == 1U,
+            "Conditional waypoint request failed.");
+    const Point3D conditionalPoint{5, 4, 4};
     require(map.getState(
-                conditionalArcPoint.x,
-                conditionalArcPoint.y,
-                conditionalArcPoint.z) == VoxelState::POSE_CONDITIONAL,
-            "The bend fixture did not create a conditional arc waypoint.");
+                conditionalPoint.x,
+                conditionalPoint.y,
+                conditionalPoint.z) == VoxelState::POSE_CONDITIONAL,
+            "The fixture did not create a conditional waypoint.");
     std::size_t conditionalWaypoint = std::numeric_limits<std::size_t>::max();
-    for (std::size_t i = 1U; i < result.paths.front().path.size(); ++i) {
+    for (std::size_t i = 1U; i < conditionalResult.paths.front().path.size(); ++i) {
         const Point3D& previous =
-            result.paths.front().path[i - 1U];
+            conditionalResult.paths.front().path[i - 1U];
         const Point3D& current =
-            result.paths.front().path[i];
+            conditionalResult.paths.front().path[i];
         require(std::abs(current.x - previous.x) <= 1 &&
                     std::abs(current.y - previous.y) <= 1 &&
                     std::abs(current.z - previous.z) <= 1,
-                "Reconstructed bend centerline is not 26-neighborhood continuous.");
-        if (current == conditionalArcPoint) {
+                "Conditional route is not 26-neighborhood continuous.");
+        if (current == conditionalPoint) {
             conditionalWaypoint = i;
         }
     }
     require(conditionalWaypoint != std::numeric_limits<std::size_t>::max(),
-            "The reconstructed bend omitted its conditional arc waypoint.");
+            "The straight route omitted its conditional waypoint.");
     bool exportedIntermediatePose = false;
-    for (const Pose& pose : result.paths.front().pose_description) {
+    for (const Pose& pose : conditionalResult.paths.front().pose_description) {
         if (pose.waypointIndex != conditionalWaypoint) {
             continue;
         }
@@ -162,10 +176,10 @@ int main() {
         break;
     }
     require(exportedIntermediatePose,
-            "A conditional intermediate bend waypoint lacks an interpolated pose.");
+            "A conditional intermediate waypoint lacks an exported pose.");
 
     std::cout << "[PASS] cost=" << result.paths.front().cost
-              << " expected_arc=" << expectedArcLength
+              << " expected_lattice=" << expectedLatticeLength
               << " states=" << result.paths.front().path.size()
               << " intermediate_pose_index=" << conditionalWaypoint
               << "\n";

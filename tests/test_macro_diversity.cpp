@@ -190,6 +190,15 @@ int main() {
                     return lhs.cost < rhs.cost;
                 }),
             "Returned paths are not sorted by physical cost.");
+    for (const PathResult& path : result.paths) {
+        double physicalLength = 0.0;
+        for (std::size_t i = 1U; i < path.path.size(); ++i) {
+            physicalLength += std::sqrt(distanceSquared(path.path[i - 1U],
+                                                        path.path[i]));
+        }
+        require(std::abs(path.cost - physicalLength) < 1e-4,
+                "Diversity search exposed internal reuse penalties as path cost.");
+    }
     double maximumOverlap = 0.0;
     for (std::size_t i = 1U; i < result.paths.size(); ++i) {
         maximumOverlap = std::max(

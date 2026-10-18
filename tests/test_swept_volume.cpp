@@ -96,7 +96,8 @@ int main() {
             start,
             twisted,
             config,
-            fifteenDegrees);
+            fifteenDegrees,
+            2.0F);
     require(!twistSweep.empty(), "15-degree twist sweep is empty.");
     require(twistSweep.size() >= staticFootprint.size(),
             "Twist sweep does not cover its static endpoint footprints.");

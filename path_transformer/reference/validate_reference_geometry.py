@@ -24,8 +24,18 @@ def validate_reference(record, source=None):
     require(record.get("status") == "VALID", "status")
     require(bool(record.get("sample_id")), "sample ID")
     provenance = record.get("source", {})
-    for key in ("planner", "source_record", "source_line", "scene_id", "map_id", "raw_fine_export"):
+    for key in ("planner", "source_record", "source_line", "scene_id", "map_id"):
         require(provenance.get(key) is not None and provenance[key] != "", f"source.{key}")
+    native = provenance.get("source_kind") == "NATIVE_FINE_PLANNER"
+    if native:
+        require(provenance.get("planner") == "native_fine_planner" and
+                provenance.get("raw_fine_export") is None, "native source identity")
+        require(record.get("validation", {}).get("validation_scope") ==
+                "SAMPLED_SDF_CONSERVATIVE_SECTION" and
+                record["validation"].get("independent_full_size_collision_proven") is False,
+                "native validation scope")
+    else:
+        require(bool(provenance.get("raw_fine_export")), "source.raw_fine_export")
     points = np.asarray(record.get("reference_centerline"), dtype=float)
     poses = record.get("reference_poses", [])
     require(points.ndim == 2 and points.shape[1] == 3 and len(points) >= 2, "centerline shape")
@@ -40,6 +50,40 @@ def validate_reference(record, source=None):
     require(bool(segments), "segment metadata")
     owner = {i for segment in segments for i in range(segment["start_index"], segment["end_index"] + 1)}
     require(owner == set(range(len(points))), "segment coverage")
+    if native:
+        expected_begin = 0
+        for segment in segments:
+            begin, end = segment["start_index"], segment["end_index"]
+            require(begin == expected_begin and begin < end < len(points), "native segment indices")
+            expected_begin = end
+            require(np.linalg.norm(points[begin] - segment["start"]) < 1e-4 and
+                    np.linalg.norm(points[end] - segment["end"]) < 1e-4,
+                    "native segment endpoints")
+            fractions = np.linspace(0.0, 1.0, end - begin + 1)
+            if segment["segment_type"] == "STRAIGHT":
+                expected = (np.asarray(segment["start"])[None, :] * (1 - fractions[:, None]) +
+                            np.asarray(segment["end"])[None, :] * fractions[:, None])
+            else:
+                center = np.asarray(segment["center"], dtype=float)
+                axis = np.asarray(segment["axis"], dtype=float)
+                radius = float(segment["radius_voxel"])
+                sweep = float(segment["signed_sweep_rad"])
+                require(center.shape == (3,) and np.isfinite(center).all() and
+                        axis.shape == (3,) and np.isfinite(axis).all() and
+                        abs(np.linalg.norm(axis) - 1) < 1e-5 and
+                        math.isfinite(radius) and radius > 0 and math.isfinite(sweep) and
+                        abs(sweep) > 1e-8, "native arc parameters")
+                radial = points[begin:end + 1] - center
+                require(np.max(np.abs(np.linalg.norm(radial, axis=1) - radius)) < 1e-4 and
+                        np.max(np.abs(radial @ axis)) < 1e-4,
+                        "native arc radius/plane")
+                radial_start = radial[0]
+                angles = sweep * fractions
+                expected = center + (np.cos(angles)[:, None] * radial_start +
+                                     np.sin(angles)[:, None] * np.cross(axis, radial_start))
+            require(np.max(np.linalg.norm(points[begin:end + 1] - expected, axis=1)) < 1e-4,
+                    "native segment ordered geometry")
+        require(expected_begin == len(points) - 1, "native segment final coverage")
     for i, pose in enumerate(poses):
         position = np.asarray(pose.get("position"), dtype=float)
         tangent = np.asarray(pose.get("tangent"), dtype=float)
@@ -62,9 +106,15 @@ def validate_reference(record, source=None):
     if source is not None:
         require(record["sample_id"] == source["sample_id"], "source sample ID")
         require(provenance["map_id"] == source["map_sha256"], "source map ID")
-        require(np.linalg.norm(points[0] - source["fine_segments"][0]["start"]) < 1e-4 and
-                np.linalg.norm(points[-1] - source["fine_segments"][-1]["end"]) < 1e-4,
-                "reference endpoints")
+        if source.get("fine_segments"):
+            start = source["fine_segments"][0]["start"]
+            goal = source["fine_segments"][-1]["end"]
+        else:
+            require(native, "missing fine segments for legacy source")
+            start = source["request"]["start"]
+            goal = source["request"]["goal"]
+        require(np.linalg.norm(points[0] - start) < 1e-4 and
+                np.linalg.norm(points[-1] - goal) < 1e-4, "reference endpoints")
     return True
 
 

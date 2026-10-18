@@ -5,3 +5,5 @@ lib/
 *.vtk
 *.obj binary
 dataset_outputs/
+__pycache__/
+*.pyc

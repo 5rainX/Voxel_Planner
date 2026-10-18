@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    bool foundConditionalPose = false;
+    bool foundCenterlineFrame = false;
     for (const voxel_planner::PathResult& path : paths) {
         if (path.path.empty() ||
             !(path.path.front() == rawStart) ||
@@ -83,19 +83,33 @@ int main(int argc, char* argv[]) {
             std::cerr << "[FAIL] Invalid 26-neighborhood path.\n";
             return 1;
         }
+        if (path.centerline_poses.size() != path.path.size()) {
+            std::cerr << "[FAIL] Centerline frame count differs from path length.\n";
+            return 1;
+        }
+        for (std::size_t index = 0U; index < path.centerline_poses.size(); ++index) {
+            const voxel_planner::PoseDescription& pose = path.centerline_poses[index];
+            if (pose.path_index != index || !isUnit(pose.normal) ||
+                !isUnit(pose.tangent) || !isOrthogonal(pose.normal, pose.tangent)) {
+                std::cerr << "[FAIL] Invalid ordered centerline frame.\n";
+                return 1;
+            }
+            foundCenterlineFrame = true;
+        }
         for (const voxel_planner::PoseDescription& pose :
              path.pose_description) {
-            if (!isUnit(pose.normal) ||
+            if (pose.path_index >= path.path.size() || !isUnit(pose.normal) ||
                 !isUnit(pose.tangent) ||
                 !isOrthogonal(pose.normal, pose.tangent)) {
                 std::cerr << "[FAIL] Invalid conditional pose export.\n";
                 return 1;
             }
-            foundConditionalPose = true;
         }
     }
-    if (!foundConditionalPose) {
-        std::cerr << "[FAIL] No conditional waypoint pose was exported.\n";
+    // This open-map fixture has no conditional waypoint. Pose descriptions
+    // may be empty; centerline_poses is the complete frame sequence.
+    if (!foundCenterlineFrame) {
+        std::cerr << "[FAIL] No centerline frame was exported.\n";
         return 1;
     }
 

@@ -347,6 +347,7 @@ public:
                     rawStart,
                     rawGoal,
                     endpointImmunityRadius,
+                    config.path_blocking_radius,
                     penalties);
                 if (penaltyRetries < kMaxPenaltyRetriesPerPath) {
                     continue;
@@ -361,6 +362,13 @@ public:
             bestGoalToleranceDistance = std::min(
                 bestGoalToleranceDistance,
                 outcome.closestGoalDistance);
+            // Reuse penalties guide subsequent searches; callers receive
+            // the physical length of each returned lattice centerline.
+            outcome.path.cost = 0.0;
+            for (std::size_t i = 1U; i < outcome.path.path.size(); ++i) {
+                outcome.path.cost += std::sqrt(squaredDistance(
+                    outcome.path.path[i - 1U], outcome.path.path[i]));
+            }
             result.paths.push_back(std::move(outcome.path));
             if (static_cast<int>(result.paths.size()) < boundedMaxPaths) {
                 addSoftPathPenalty(
@@ -369,6 +377,7 @@ public:
                     rawStart,
                     rawGoal,
                     endpointImmunityRadius,
+                    config.path_blocking_radius,
                     penalties);
             }
         }
@@ -1653,14 +1662,34 @@ private:
         const Point3D& rawStart,
         const Point3D& rawGoal,
         float endpointProtectionRadius,
+        float blockingRadius,
         CostPenaltyMap& penalties) {
         const double endpointRadiusSquared =
             static_cast<double>(endpointProtectionRadius) *
             endpointProtectionRadius;
+        const int radius = static_cast<int>(std::ceil(std::min(
+            static_cast<double>(blockingRadius),
+            std::hypot(std::hypot(static_cast<double>(map.width()),
+                                  static_cast<double>(map.height())),
+                       static_cast<double>(map.depth())))));
+        const double radiusSquared =
+            static_cast<double>(blockingRadius) * blockingRadius;
         for (const Point3D& point : centerline) {
-            for (int dz = -1; dz <= 1; ++dz) {
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dx = -1; dx <= 1; ++dx) {
+            const int minZ = std::max(-radius, -point.z);
+            const int maxZ = std::min(radius, static_cast<int>(map.depth()) - 1 - point.z);
+            const int minY = std::max(-radius, -point.y);
+            const int maxY = std::min(radius, static_cast<int>(map.height()) - 1 - point.y);
+            const int minX = std::max(-radius, -point.x);
+            const int maxX = std::min(radius, static_cast<int>(map.width()) - 1 - point.x);
+            for (int dz = minZ; dz <= maxZ; ++dz) {
+                for (int dy = minY; dy <= maxY; ++dy) {
+                    for (int dx = minX; dx <= maxX; ++dx) {
+                        if (static_cast<double>(dx) * dx +
+                                static_cast<double>(dy) * dy +
+                                static_cast<double>(dz) * dz >
+                            radiusSquared) {
+                            continue;
+                        }
                         const Point3D candidate{
                             point.x + dx,
                             point.y + dy,

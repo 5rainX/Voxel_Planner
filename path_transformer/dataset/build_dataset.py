@@ -142,7 +142,7 @@ def make_sample(source, source_path, source_line, field, environment_path):
         source_file = str(source_path.as_posix())
     result = {
         "schema_version": SCHEMA_VERSION, "sample_id": source["sample_id"],
-        "provenance": {"source": SOURCE, "source_file": source_file,
+        "provenance": {"source": (enriched["source"]["planner"] if enriched is not None else SOURCE), "source_file": source_file,
                        "source_line": source_line, "source_sample_id": source["sample_id"],
                        "scene_id": source.get("case_id"), "map_id": source["map_sha256"],
                        "map_file": source["map_file"],
@@ -156,12 +156,14 @@ def make_sample(source, source_path, source_line, field, environment_path):
         "busbar": {"width": width, "thickness": thickness, "units": "voxel"},
         "start": {"position": start.tolist()}, "goal": {"position": goal.tolist()},
         "coarse_path": nodes,
-        "reference": {"source": SOURCE, "role": "supervision_candidate",
+        "reference": {"source": (enriched["source"]["planner"] if enriched is not None else SOURCE), "role": "supervision_candidate",
                       "reference_geometry_version": REFERENCE_VERSION if enriched is not None else None,
                       "independent_geometry_validation": bool(source.get("independent_geometry_validation", False)),
                       "global_optimality_proven": bool(source.get("global_optimality_proven", False)),
                       "centerline": reference.tolist(), "aligned_centerline": aligned.tolist(),
-                      "source_segment_types": [segment["type"] for segment in source["fine_segments"]]},
+                      "source_segment_types": ([segment["segment_type"] for segment in enriched["segments"]]
+                                               if enriched is not None else
+                                               [segment["type"] for segment in source["fine_segments"]])},
         "targets": targets,
         "validation": {"geometry_label_valid": True, "full_feature_valid": True,
                        "endpoint_mismatch_voxel": endpoint_mismatch,

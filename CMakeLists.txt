@@ -95,9 +95,56 @@ target_compile_options(test_elastic_band PRIVATE
 )
 add_test(NAME test_elastic_band COMMAND test_elastic_band)
 
+# Maintained legacy source tests live in tests/; historical run records are separate.
+foreach(test_name IN ITEMS
+    test_jump_astar test_pose_generation test_pose_footprint
+    test_macro_diversity test_swept_volume test_mask_population
+    test_se3_astar test_edge_cases)
+    add_executable(${test_name} "tests/${test_name}.cpp")
+    target_link_libraries(${test_name} PRIVATE voxel_planner)
+    target_include_directories(${test_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+add_executable(api_integration_test tests/api_integration_test.cpp)
+target_link_libraries(api_integration_test PRIVATE voxel_planner)
+add_test(NAME api_integration_test COMMAND api_integration_test
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/api_open_map.txt")
+
+add_executable(verify_missing_flag tests/verify_missing_flag.cpp)
+target_link_libraries(verify_missing_flag PRIVATE voxel_planner)
+target_include_directories(verify_missing_flag PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME verify_missing_flag COMMAND verify_missing_flag
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/missing_flag_map.txt")
+
 add_executable(generate_dataset src/tools/DatasetGenerator.cpp)
 target_link_libraries(generate_dataset PRIVATE voxel_planner)
 target_include_directories(generate_dataset
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
 )
+
+# Fine geometry is a separate module; the coarse planner target and API stay intact.
+add_library(fine_planner STATIC
+    src/fine_planner/FinePlanner.cpp
+    src/fine_planner/GeometryValidator.cpp
+    src/fine_planner/ReferenceExport.cpp
+)
+target_include_directories(fine_planner PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(fine_planner PUBLIC voxel_planner)
+target_compile_features(fine_planner PUBLIC cxx_std_17)
+
+add_executable(test_fine_planner tests/fine_planner/test_fine_planner.cpp)
+target_link_libraries(test_fine_planner PRIVATE fine_planner)
+target_include_directories(test_fine_planner PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME test_fine_planner COMMAND test_fine_planner)
+
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_fine_planner_reference_integration
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fine_planner/test_reference_integration.py"
+            "$<TARGET_FILE:test_fine_planner>")
+    set_tests_properties(test_fine_planner_reference_integration PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
