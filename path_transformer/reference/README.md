@@ -16,6 +16,35 @@ For non-twisting straight segments whose exported endpoint normals agree, the ex
 
 `geometry.py` includes a deterministic exact-circle sampler for a **future explicit** `exact_arc_parameters` source (`center`, `radius`, `axis`, signed `sweep_angle_rad`, `source=DIRECT_PLANNER_ARC_PARAMETERS`). It verifies radius, plane, endpoint and length. Historical bend records have no such parameters, so this path is never used to invent their geometry.
 
+## A06.2 direct planner export intake
+
+The historical external fine planner source and executable are not present here, so this repository cannot add an exporter to that planner or recover the eight historical bends without its real output. P1's native Fine Planner has a separate Reference Geometry V1 export and does not claim to reproduce those historical runs. This optional importer is only for external planner output tied to an existing TXT. Place its JSON sidecar under a separate export root at the same relative case path as the candidate TXT, replacing `.txt` with `.reference.json` (for example `case/busbar_path_candidate_001.reference.json`). Run enrichment with `--planner-export-root <directory>`. Do not edit the historical TXT or `accepted.jsonl`.
+
+```json
+{
+  "export_version": "fine_planner_reference_v1",
+  "sample_id": "case:1",
+  "map_sha256": "<source map SHA-256>",
+  "raw_fine_export_sha256": "<candidate TXT SHA-256>",
+  "segments": [
+    {
+      "segment_index": 0,
+      "segment_type": "STRAIGHT",
+      "poses": [
+        {"position": [0, 0, 0], "tangent": [1, 0, 0],
+         "normal": [0, 0, 1], "binormal": [0, -1, 0],
+         "orientation_valid": true},
+        {"position": [0.25, 0, 0], "tangent": [1, 0, 0],
+         "normal": [0, 0, 1], "binormal": [0, -1, 0],
+         "orientation_valid": true}
+      ]
+    }
+  ]
+}
+```
+
+The example shows field names; coordinates must match the corresponding source segment. Export one segment entry per original `fine_segments` entry, with both endpoints and at least two ordered poses. Positions and frames must come from the planner, with sample spacing at most 0.25 voxel. If a point's physical orientation is unavailable, set `orientation_valid=false` and both `normal` and `binormal` to `null`; theta will be masked. The importer checks sample ID, map hash, raw TXT hash, segment identity, endpoints, spacing, tangent agreement and frame orthogonality before Dataset V1 uses it. These checks bind and validate the supplied data; they cannot prove that the external planner generated it. A sidecar with a mismatched binding is rejected, never replaced with guessed geometry. An absent sidecar leaves the conservative A06.1 reconstruction and bend rejection in place. The enriched record stores the sidecar path and SHA-256 with `source_kind=LEGACY_TXT_PLANNER_SIDECAR`; P1 native exports use `source_kind=NATIVE_FINE_PLANNER` and have no historical TXT hash.
+
 ## Commands
 
 From the repository root:

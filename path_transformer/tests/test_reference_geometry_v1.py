@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -159,6 +160,83 @@ class ReferenceTests(unittest.TestCase):
         source["reference_geometry_v1"] = self.enrich(source)
         sample = make_sample(source,self.source_path,1,np.full((4,4,4),2.0,dtype="<f4"),"environments/x.bin")
         self.assertIsNone(sample["targets"][1]["theta"])
+        self.assertFalse(sample["targets"][1]["theta_valid"])
+
+    def test_direct_planner_bend_export_is_bound_to_source(self):
+        bend = {"type": "VERTICAL_BEND", "start": [2, 1, 1], "end": [1, 2, 1],
+                "start_tangent": [0, 1, 0], "end_tangent": [-1, 0, 0],
+                "start_normal": [0, 0, 1], "end_normal": [0, 0, 1],
+                "length": math.pi / 2, "angle": math.pi / 2, "cost": 1}
+        source = source_for([bend], [[2, 1, 1], [1.5, 1.5, 1], [1, 2, 1]])
+        points = sample_explicit_arc([2, 1, 1], [1, 1, 1], [0, 0, 1], 1, math.pi / 2, 0.125)
+        poses = []
+        for point in points:
+            radial = point - [1, 1, 1]
+            tangent = np.cross([0, 0, 1], radial)
+            poses.append({"position": point.tolist(), "tangent": tangent.tolist(),
+                          "normal": [0, 0, 1], "binormal": np.cross(tangent, [0, 0, 1]).tolist(),
+                          "orientation_valid": True})
+        raw = self.root / "case" / "busbar_path_candidate_001.txt"
+        export_root = self.root / "planner_exports"
+        sidecar = export_root / "case" / "busbar_path_candidate_001.reference.json"
+        sidecar.parent.mkdir(parents=True)
+        export = {"export_version": "fine_planner_reference_v1", "sample_id": source["sample_id"],
+                  "map_sha256": source["map_sha256"],
+                  "raw_fine_export_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+                  "segments": [{"segment_index": 0, "segment_type": "VERTICAL_BEND", "poses": poses}]}
+        sidecar.write_text(json.dumps(export), encoding="utf-8")
+        ref = enrich_row(source, self.source_path, 1, planner_export_root=export_root)
+        self.assertTrue(validate_reference(ref, source))
+        self.assertEqual(ref["source"]["source_kind"], "LEGACY_TXT_PLANNER_SIDECAR")
+        self.assertEqual(ref["segments"][0]["geometry_source"], "DIRECT_PLANNER_SAMPLES")
+        self.assertEqual(ref["validation"]["orientation_valid_nodes"], len(poses))
+        sample = make_sample({**source, "reference_geometry_v1": ref}, self.source_path, 1,
+                             np.full((4, 4, 4), 2.0, dtype="<f4"), "environments/x.bin")
+        self.assertGreater(len(sample["reference"]["centerline"]), 2)
+        self.assertTrue(any(abs(target["du"]) > 1e-4 or abs(target["dv"]) > 1e-4
+                            for target in sample["targets"]))
+        self.assertTrue(all(target["theta_valid"] for target in sample["targets"]))
+        export["raw_fine_export_sha256"] = "0" * 64
+        sidecar.write_text(json.dumps(export), encoding="utf-8")
+        with self.assertRaises(SampleError) as mismatch:
+            enrich_row(source, self.source_path, 1, planner_export_root=export_root)
+        self.assertEqual(mismatch.exception.code, "PLANNER_EXPORT_SOURCE_MISMATCH")
+
+    def test_malformed_planner_sidecar_is_rejected(self):
+        source = source_for([straight([0, 1, 1], [1, 1, 1])])
+        export_root = self.root / "planner_exports"
+        sidecar = export_root / "case" / "busbar_path_candidate_001.reference.json"
+        sidecar.parent.mkdir(parents=True)
+        sidecar.write_text("[]", encoding="utf-8")
+        with self.assertRaises(SampleError) as malformed:
+            enrich_row(source, self.source_path, 1, planner_export_root=export_root)
+        self.assertEqual(malformed.exception.code, "PLANNER_EXPORT_SCHEMA_INVALID")
+
+    def test_direct_junction_with_missing_orientation_is_masked(self):
+        source = source_for([straight([0, 1, 1], [1, 1, 1]),
+                             straight([1, 1, 1], [2, 1, 1])],
+                            [[0, 1, 1], [1, 1, 1], [2, 1, 1]])
+        export_root = self.root / "planner_exports"
+        sidecar = export_root / "case" / "busbar_path_candidate_001.reference.json"
+        sidecar.parent.mkdir(parents=True)
+        segments = []
+        for index in range(2):
+            poses = [{"position": [index + j / 4, 1, 1], "tangent": [1, 0, 0],
+                      "normal": [0, 0, 1], "binormal": [0, -1, 0],
+                      "orientation_valid": True} for j in range(5)]
+            if index == 1:
+                poses[0].update(normal=None, binormal=None, orientation_valid=False)
+            segments.append({"segment_index": index, "segment_type": "STRAIGHT", "poses": poses})
+        raw = self.root / "case" / "busbar_path_candidate_001.txt"
+        sidecar.write_text(json.dumps({"export_version": "fine_planner_reference_v1",
+                                       "sample_id": source["sample_id"],
+                                       "map_sha256": source["map_sha256"],
+                                       "raw_fine_export_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+                                       "segments": segments}), encoding="utf-8")
+        ref = enrich_row(source, self.source_path, 1, planner_export_root=export_root)
+        self.assertFalse(ref["reference_poses"][4]["orientation_valid"])
+        sample = make_sample({**source, "reference_geometry_v1": ref}, self.source_path, 1,
+                             np.full((4, 4, 4), 2.0, dtype="<f4"), "environments/x.bin")
         self.assertFalse(sample["targets"][1]["theta_valid"])
 
 
