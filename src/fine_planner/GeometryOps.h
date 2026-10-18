@@ -41,8 +41,16 @@ inline const char* typeName(SegmentType type) {
     case SegmentType::STRAIGHT: return "STRAIGHT";
     case SegmentType::HORIZONTAL_BEND: return "HORIZONTAL_BEND";
     case SegmentType::VERTICAL_BEND: return "VERTICAL_BEND";
+    case SegmentType::STRAIGHT_TWIST: return "STRAIGHT_TWIST";
     }
     return "UNKNOWN";
+}
+inline const char* profileName(TwistProfile profile) {
+    switch(profile) {
+    case TwistProfile::LINEAR: return "LINEAR";
+    case TwistProfile::SMOOTHSTEP: return "SMOOTHSTEP";
+    }
+    throw std::invalid_argument("INVALID_TWIST_PROFILE");
 }
 
 } // namespace fine_planner::detail

@@ -18,6 +18,8 @@ tests are in `tests/fine_planner/`. Historical evidence under
 `testrecord_2026-09-27/` remains unchanged. See
 [`docs/fine_planner_p1.md`](docs/fine_planner_p1.md) for the geometry contract,
 validation limits, and native Reference Geometry V1 export.
+P2.1 extends this target with explicit straight twist segments; see
+[`docs/fine_planner_p2_1.md`](docs/fine_planner_p2_1.md).
 
 `SqpProjector` remains an optional position smoother. The Fine Planner requires
 explicit arc center, axis, radius and signed sweep; it does not infer bends

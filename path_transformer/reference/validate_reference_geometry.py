@@ -34,6 +34,23 @@ def validate_reference(record, source=None):
                 "SAMPLED_SDF_CONSERVATIVE_SECTION" and
                 record["validation"].get("independent_full_size_collision_proven") is False,
                 "native validation scope")
+        width = record.get("section_width_voxel")
+        thickness = record.get("section_thickness_voxel")
+        require((width is None) == (thickness is None), "native section dimensions")
+        if width is not None:
+            require(all(isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+                        for value in (width, thickness)), "native section dimensions")
+            if source is not None:
+                args = source.get("request", {}).get("args", [])
+                try:
+                    source_width = float(args[args.index("--width") + 1])
+                    source_thickness = float(args[args.index("--thickness") + 1])
+                except (AttributeError, ValueError, IndexError, TypeError):
+                    require(False, "native source section dimensions")
+                require(math.isfinite(source_width) and math.isfinite(source_thickness) and
+                        abs(source_width - width) < 1e-8 and
+                        abs(source_thickness - thickness) < 1e-8,
+                        "native source section dimensions")
     else:
         require(bool(provenance.get("raw_fine_export")), "source.raw_fine_export")
     points = np.asarray(record.get("reference_centerline"), dtype=float)
@@ -52,18 +69,58 @@ def validate_reference(record, source=None):
     require(owner == set(range(len(points))), "segment coverage")
     if native:
         expected_begin = 0
-        for segment in segments:
+        for segment_index, segment in enumerate(segments):
             begin, end = segment["start_index"], segment["end_index"]
-            require(begin == expected_begin and begin < end < len(points), "native segment indices")
+            require(segment["segment_index"] == segment_index and
+                    begin == expected_begin and begin < end < len(points),
+                    "native segment indices")
             expected_begin = end
+            # The shared junction pose belongs to the preceding segment.
+            for index in range(begin if begin == 0 else begin + 1, end + 1):
+                require(poses[index].get("segment_index") == segment["segment_index"] and
+                        poses[index].get("segment_type") == segment["segment_type"],
+                        "native pose segment identity")
             require(np.linalg.norm(points[begin] - segment["start"]) < 1e-4 and
                     np.linalg.norm(points[end] - segment["end"]) < 1e-4,
                     "native segment endpoints")
             fractions = np.linspace(0.0, 1.0, end - begin + 1)
-            if segment["segment_type"] == "STRAIGHT":
+            kind = segment["segment_type"]
+            if kind in ("STRAIGHT", "STRAIGHT_TWIST"):
                 expected = (np.asarray(segment["start"])[None, :] * (1 - fractions[:, None]) +
                             np.asarray(segment["end"])[None, :] * fractions[:, None])
-            else:
+                if kind == "STRAIGHT_TWIST":
+                    length = float(segment["twist_length_voxel"])
+                    angle = float(segment["twist_angle_rad"])
+                    profile = segment["twist_profile"]
+                    start_normal = np.asarray(segment["twist_start_normal"], dtype=float)
+                    end_normal = np.asarray(segment["twist_end_normal"], dtype=float)
+                    tangent = (points[end] - points[begin]) / np.linalg.norm(points[end] - points[begin])
+                    require(math.isfinite(length) and length > 0 and
+                            abs(length - np.linalg.norm(points[end] - points[begin])) < 1e-4 and
+                            math.isfinite(angle) and profile in ("LINEAR", "SMOOTHSTEP") and
+                            start_normal.shape == (3,) and end_normal.shape == (3,) and
+                            np.isfinite(start_normal).all() and np.isfinite(end_normal).all() and
+                            abs(np.linalg.norm(start_normal) - 1) < 1e-5 and
+                            abs(np.linalg.norm(end_normal) - 1) < 1e-5 and
+                            abs(float(start_normal @ tangent)) < 1e-5 and
+                            abs(float(end_normal @ tangent)) < 1e-5,
+                            "native twist parameters")
+                    shaped = fractions if profile == "LINEAR" else fractions**2 * (3 - 2 * fractions)
+                    angles = angle * shaped
+                    expected_normals = (np.cos(angles)[:, None] * start_normal +
+                                        np.sin(angles)[:, None] * np.cross(tangent, start_normal))
+                    require(np.linalg.norm(expected_normals[-1] - end_normal) < 1e-4,
+                            "native twist end frame")
+                    for index, expected_normal in zip(range(begin, end + 1), expected_normals):
+                        pose = poses[index]
+                        require(pose.get("orientation_valid") is True and
+                                np.linalg.norm(np.asarray(pose["normal"], dtype=float) - expected_normal) < 1e-4 and
+                                np.linalg.norm(np.asarray(pose["tangent"], dtype=float) - tangent) < 1e-4,
+                                "native twist frame evolution")
+                    peak_rate = (1.5 if profile == "SMOOTHSTEP" else 1.0) * abs(angle) / length
+                    require(abs(float(segment["peak_twist_rate_rad_per_voxel"]) - peak_rate) < 1e-6,
+                            "native twist rate metadata")
+            elif kind in ("HORIZONTAL_BEND", "VERTICAL_BEND"):
                 center = np.asarray(segment["center"], dtype=float)
                 axis = np.asarray(segment["axis"], dtype=float)
                 radius = float(segment["radius_voxel"])
@@ -81,6 +138,8 @@ def validate_reference(record, source=None):
                 angles = sweep * fractions
                 expected = center + (np.cos(angles)[:, None] * radial_start +
                                      np.sin(angles)[:, None] * np.cross(axis, radial_start))
+            else:
+                require(False, "native segment type")
             require(np.max(np.linalg.norm(points[begin:end + 1] - expected, axis=1)) < 1e-4,
                     "native segment ordered geometry")
         require(expected_begin == len(points) - 1, "native segment final coverage")

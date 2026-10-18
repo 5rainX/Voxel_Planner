@@ -21,7 +21,14 @@ ValidationReport GeometryValidator::validate(
             request.maximum_sample_spacing>0.25 || !std::isfinite(request.width) ||
             !std::isfinite(request.thickness) || !std::isfinite(request.safe_margin) ||
             !std::isfinite(request.minimum_bend_radius) ||
-            !std::isfinite(request.maximum_sample_spacing))
+            !std::isfinite(request.maximum_sample_spacing) ||
+            !std::isfinite(request.maximum_twist_step_rad) ||
+            request.maximum_twist_step_rad<=0.0 ||
+            request.maximum_twist_step_rad>1.5707963267948966 ||
+            !std::isfinite(request.minimum_twist_length) ||
+            request.minimum_twist_length<0.0 ||
+            !std::isfinite(request.maximum_twist_rate_rad_per_voxel) ||
+            request.maximum_twist_rate_rad_per_voxel<0.0)
             return reject("INVALID_GEOMETRY");
         for (Vec3 point:request.coarse_path)
             if (!detail::finite(point)) return reject("NONFINITE_COARSE_PATH");
@@ -58,11 +65,20 @@ ValidationReport GeometryValidator::validate(
                 if (requested.type!=actual.type||
                     !detail::near(requested.start,actual.start)||
                     !detail::near(requested.end,actual.end)||
-                    (requested.type!=SegmentType::STRAIGHT &&
+                    ((requested.type==SegmentType::HORIZONTAL_BEND ||
+                      requested.type==SegmentType::VERTICAL_BEND) &&
                      (!detail::near(requested.center,actual.center)||
                       !detail::near(requested.axis,actual.axis)||
                       std::abs(requested.radius-actual.radius)>1e-8||
-                      std::abs(requested.sweep_rad-actual.sweep_rad)>1e-8)))
+                      std::abs(requested.sweep_rad-actual.sweep_rad)>1e-8)) ||
+                    (requested.type==SegmentType::STRAIGHT_TWIST &&
+                     (!std::isfinite(requested.twist_angle_rad)||
+                      !std::isfinite(requested.twist_length)||
+                      !detail::near(requested.twist_start_normal,actual.twist_start_normal)||
+                      !detail::near(requested.twist_end_normal,actual.twist_end_normal)||
+                      std::abs(requested.twist_angle_rad-actual.twist_angle_rad)>1e-8||
+                      std::abs(requested.twist_length-actual.twist_length)>1e-8||
+                      requested.twist_profile!=actual.twist_profile)))
                     return reject("REQUEST_SEGMENT_MISMATCH");
             }
         }
@@ -107,9 +123,35 @@ ValidationReport GeometryValidator::validate(
                 return reject("SEGMENT_COVERAGE_OR_ENDPOINT");
             Vec3 startTangent{};
             Vec3 axis{}, radial{};
-            if (spec.type==SegmentType::STRAIGHT) {
+            const bool twist=spec.type==SegmentType::STRAIGHT_TWIST;
+            const bool straight=spec.type==SegmentType::STRAIGHT || twist;
+            if (straight) {
                 startTangent=detail::unit(detail::sub(spec.end,spec.start));
-            } else {
+                if (twist) {
+                    const double length=detail::distance(spec.start,spec.end);
+                    const double peakFactor=spec.twist_profile==TwistProfile::SMOOTHSTEP?1.5:1.0;
+                    if ((spec.twist_profile!=TwistProfile::LINEAR &&
+                         spec.twist_profile!=TwistProfile::SMOOTHSTEP) ||
+                        !std::isfinite(spec.twist_angle_rad)||
+                        !std::isfinite(spec.twist_length)||spec.twist_length<=0.0||
+                        std::abs(spec.twist_length-length)>1e-4||
+                        spec.twist_length+1e-9<request.minimum_twist_length||
+                        (request.maximum_twist_rate_rad_per_voxel>0.0 &&
+                         peakFactor*std::abs(spec.twist_angle_rad)/spec.twist_length>
+                             request.maximum_twist_rate_rad_per_voxel+1e-9)||
+                        !detail::finite(spec.twist_start_normal)||
+                        !detail::finite(spec.twist_end_normal)||
+                        std::abs(detail::norm(spec.twist_start_normal)-1.0)>1e-5||
+                        std::abs(detail::norm(spec.twist_end_normal)-1.0)>1e-5||
+                        std::abs(detail::dot(spec.twist_start_normal,startTangent))>1e-5||
+                        std::abs(detail::dot(spec.twist_end_normal,startTangent))>1e-5||
+                        !detail::aligned(detail::rotate(spec.twist_start_normal,
+                                                        startTangent,spec.twist_angle_rad),
+                                         spec.twist_end_normal,1e-5))
+                        return reject("INVALID_TWIST_PARAMETERS_OR_CONSTRAINT");
+                }
+            } else if (spec.type==SegmentType::HORIZONTAL_BEND ||
+                       spec.type==SegmentType::VERTICAL_BEND) {
                 if (!std::isfinite(spec.radius)||spec.radius+1e-9<request.minimum_bend_radius||
                     spec.radius<=0.0||!std::isfinite(spec.sweep_rad)||
                     std::abs(spec.sweep_rad)<1e-8)
@@ -123,27 +165,48 @@ ValidationReport GeometryValidator::validate(
                     return reject("INVALID_ARC_PLANE_OR_RADIUS");
                 startTangent=detail::unit(detail::mul(detail::cross(axis,radial),
                                                      spec.sweep_rad>0.0?1.0:-1.0));
+            } else {
+                return reject("UNKNOWN_SEGMENT_TYPE");
             }
             if (!detail::aligned(result.poses[segment.start_index].tangent,startTangent))
                 return reject("SEGMENT_TANGENT_MISMATCH");
             const Vec3 startNormal=result.poses[segment.start_index].normal;
+            if (twist && !detail::aligned(startNormal,spec.twist_start_normal,1e-5))
+                return reject("TWIST_START_FRAME_MISMATCH");
             const std::size_t steps=segment.end_index-segment.start_index;
             for (std::size_t j=0U;j<=steps;++j) {
                 const double fraction=static_cast<double>(j)/static_cast<double>(steps);
                 const double angle=spec.sweep_rad*fraction;
-                const Vec3 expectedPosition=spec.type==SegmentType::STRAIGHT
+                const double twistFraction=spec.twist_profile==TwistProfile::SMOOTHSTEP
+                    ?fraction*fraction*(3.0-2.0*fraction):fraction;
+                const Vec3 expectedPosition=straight
                     ?detail::add(spec.start,detail::mul(detail::sub(spec.end,spec.start),fraction))
                     :detail::add(spec.center,detail::rotate(radial,axis,angle));
-                const Vec3 expectedTangent=spec.type==SegmentType::STRAIGHT
+                const Vec3 expectedTangent=straight
                     ?startTangent:detail::rotate(startTangent,axis,angle);
-                const Vec3 expectedNormal=spec.type==SegmentType::STRAIGHT
-                    ?startNormal:detail::rotate(startNormal,axis,angle);
+                const Vec3 expectedNormal=twist
+                    ?detail::rotate(spec.twist_start_normal,startTangent,
+                                   spec.twist_angle_rad*twistFraction)
+                    :(straight?startNormal:detail::rotate(startNormal,axis,angle));
                 const Pose& pose=result.poses[segment.start_index+j];
                 if (!detail::near(pose.position,expectedPosition)||
                     !detail::aligned(pose.tangent,expectedTangent,1e-5)||
                     !detail::aligned(pose.normal,expectedNormal,1e-5))
                     return reject("SEGMENT_GEOMETRY_OR_FRAME_MISMATCH");
+                if (twist && j>0U) {
+                    const double previousFraction=static_cast<double>(j-1U)/steps;
+                    const double previousTwistFraction=spec.twist_profile==TwistProfile::SMOOTHSTEP
+                        ?previousFraction*previousFraction*(3.0-2.0*previousFraction)
+                        :previousFraction;
+                    if (std::abs(spec.twist_angle_rad)*
+                            (twistFraction-previousTwistFraction)>
+                        request.maximum_twist_step_rad+1e-6)
+                        return reject("TWIST_SAMPLE_ANGLE_TOO_LARGE");
+                }
             }
+            if (twist && !detail::aligned(result.poses[segment.end_index].normal,
+                                          spec.twist_end_normal,1e-5))
+                return reject("TWIST_END_FRAME_MISMATCH");
             expectedStart=segment.end_index;
         }
         if (expectedStart!=result.poses.size()-1U)

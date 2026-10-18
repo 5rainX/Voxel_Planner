@@ -1,6 +1,7 @@
 #include "fine_planner/ReferenceExport.h"
 #include "GeometryOps.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -43,7 +44,13 @@ void writeReferenceGeometryV1(
     out << ",\"source_line\":1,\"source_sample_id\":"; string(out,request.sample_id);
     out << ",\"scene_id\":"; string(out,request.scene_id);
     out << ",\"map_id\":"; string(out,request.map_sha256);
-    out << ",\"generator_version\":\"P1-fine-planner-v1\"}";
+    const bool containsTwist=std::any_of(result.segments.begin(),result.segments.end(),
+        [](const Segment& segment) { return segment.spec.type==SegmentType::STRAIGHT_TWIST; });
+    out << ",\"generator_version\":";
+    string(out,containsTwist?"P2.1-fine-planner-v1":"P1-fine-planner-v1");
+    out << '}';
+    out << ",\"section_width_voxel\":" << request.width
+        << ",\"section_thickness_voxel\":" << request.thickness;
     out << ",\"reference_centerline\":[";
     for (std::size_t i=0;i<result.poses.size();++i) {
         if (i) out << ',';
@@ -78,11 +85,23 @@ void writeReferenceGeometryV1(
             << ",\"end_index\":" << segment.end_index
             << ",\"geometry_source\":\"NATIVE_FINE_PLANNER_EXACT_GEOMETRY\""
             << ",\"geometry_reconstruction_method\":\"DETERMINISTIC_EXACT_SEGMENTS\""
-            << ",\"orientation_source\":\"NATIVE_TRANSPORTED_FRAME\""
-            << ",\"start\":";
+            << ",\"orientation_source\":";
+        string(out,segment.spec.type==SegmentType::STRAIGHT_TWIST
+                   ?"NATIVE_EXPLICIT_TWIST_FRAME":"NATIVE_TRANSPORTED_FRAME");
+        out << ",\"start\":";
         vec(out,segment.spec.start);
         out << ",\"end\":"; vec(out,segment.spec.end);
-        if (segment.spec.type!=SegmentType::STRAIGHT) {
+        if (segment.spec.type==SegmentType::STRAIGHT_TWIST) {
+            out << ",\"twist_start_normal\":"; vec(out,segment.spec.twist_start_normal);
+            out << ",\"twist_end_normal\":"; vec(out,segment.spec.twist_end_normal);
+            out << ",\"twist_angle_rad\":" << segment.spec.twist_angle_rad
+                << ",\"twist_length_voxel\":" << segment.spec.twist_length
+                << ",\"twist_profile\":";
+            string(out,detail::profileName(segment.spec.twist_profile));
+            out << ",\"peak_twist_rate_rad_per_voxel\":"
+                << (segment.spec.twist_profile==TwistProfile::SMOOTHSTEP?1.5:1.0)*
+                   std::abs(segment.spec.twist_angle_rad)/segment.spec.twist_length;
+        } else if (segment.spec.type!=SegmentType::STRAIGHT) {
             out << ",\"center\":"; vec(out,segment.spec.center);
             out << ",\"axis\":"; vec(out,segment.spec.axis);
             out << ",\"radius_voxel\":" << segment.spec.radius

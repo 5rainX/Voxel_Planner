@@ -75,6 +75,22 @@ def _reference_normal_at(reference, s):
     return interpolated.tolist() if np.linalg.norm(interpolated) > 1e-8 else None
 
 
+def _unrepresentable_native_twist_at(reference, s):
+    """A bounded per-node theta cannot supervise a complete larger turn."""
+    if reference is None or reference.get("source", {}).get("source_kind") != "NATIVE_FINE_PLANNER":
+        return False
+    poses = reference["reference_poses"]
+    for segment in reference["segments"]:
+        if segment["segment_type"] != "STRAIGHT_TWIST" or \
+                abs(segment["twist_angle_rad"]) <= math.pi / 2 + 1e-6:
+            continue
+        begin = poses[segment["start_index"]]["s_normalized"]
+        end = poses[segment["end_index"]]["s_normalized"]
+        if begin - 1e-8 <= s <= end + 1e-8:
+            return True
+    return False
+
+
 def make_sample(source, source_path, source_line, field, environment_path):
     coarse = np.asarray(source["coarse_centerline"], dtype=np.float64)
     enriched = source.get(REFERENCE_VERSION)
@@ -121,8 +137,9 @@ def make_sample(source, source_path, source_line, field, environment_path):
         reference_normal = (_reference_normal_at(enriched, float(s_values[i]))
                             if enriched is not None else normal)
         theta = signed_theta(frame, reference_normal) if reference_normal is not None else None
-        if theta is not None and abs(theta) > math.pi / 2 + 1e-6:
-            theta = None  # current model cannot emit that orientation
+        if theta is not None and (abs(theta) > math.pi / 2 + 1e-6 or
+                                  _unrepresentable_native_twist_at(enriched, float(s_values[i]))):
+            theta = None  # outside the target range or ambiguous cumulative turn
         sdf = sdf_features(field, point, u, v, width, thickness)
         nodes.append({"position": point.tolist(), "tangent": t.tolist(), "normal": u.tolist(),
                       "binormal": v.tolist(), "s_normalized": float(s_values[i]), "sdf": sdf})

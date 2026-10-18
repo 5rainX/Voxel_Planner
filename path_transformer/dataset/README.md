@@ -29,7 +29,7 @@ Compute cumulative arc length separately on the coarse and reconstructed referen
 
 The hard reconstruction threshold is **1 voxel**, the native map resolution. A maximum error above **0.5 voxel**, its half-cell localization scale, produces `LONGITUDINAL_RESIDUAL_ABOVE_HALF_VOXEL` in `validation.quality_warnings`; above 1 voxel rejects the sample. `stats.json` reports reconstruction residual, spatial alignment offset, and longitudinal residual. Spatial alignment offset measures coarse-to-reference displacement after interpolation, not an independently known correspondence error.
 
-For a purely straight reference with consistent segment normals, `theta = atan2(u_ref·v, u_ref·u)` after projecting the reference normal perpendicular to the coarse tangent. It is masked if outside the present model's ±π/2 output range. For a twist, or any uncertain reference orientation, `theta` is `null` and `theta_valid=false`; it is never filled with a fake zero. A07 must honor this per-node mask.
+For a sourced reference with valid section normals, `theta = atan2(u_ref·v, u_ref·u)` after projecting the reference normal perpendicular to the coarse tangent. Native Fine Planner twists with total signed angle within the present model's ±π/2 output range can yield valid per-node theta labels. Angles outside that range are masked. Every node covered by a native twist whose total angle exceeds ±π/2 is also masked: a bounded per-node angle cannot encode its cumulative turn, even when a 360° endpoint has the same frame as the start. Uncertain reference orientation likewise gives `theta=null` and `theta_valid=false`; no fake zero is filled. A07 must honor this per-node mask.
 
 ## SDF features
 

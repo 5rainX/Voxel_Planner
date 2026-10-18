@@ -147,4 +147,16 @@ if(Python3_Interpreter_FOUND)
             "$<TARGET_FILE:test_fine_planner>")
     set_tests_properties(test_fine_planner_reference_integration PROPERTIES
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME test_twist_reference_integration
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fine_planner/test_twist_reference_integration.py"
+            "$<TARGET_FILE:test_fine_planner>")
+    set_tests_properties(test_twist_reference_integration PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME test_twist_cross_validation
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/fine_planner/test_twist_cross_validation.py"
+            "$<TARGET_FILE:test_fine_planner>")
+    set_tests_properties(test_twist_cross_validation PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()

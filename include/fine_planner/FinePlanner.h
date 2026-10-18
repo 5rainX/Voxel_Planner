@@ -10,7 +10,8 @@ namespace fine_planner {
 
 using Vec3 = environment::Vec3;
 
-enum class SegmentType { STRAIGHT, HORIZONTAL_BEND, VERTICAL_BEND };
+enum class SegmentType { STRAIGHT, HORIZONTAL_BEND, VERTICAL_BEND, STRAIGHT_TWIST };
+enum class TwistProfile { LINEAR, SMOOTHSTEP };
 
 // Bends require all exact parameters. Names identify the requested process;
 // the explicit axis, rather than the name, defines the actual bend plane.
@@ -22,6 +23,11 @@ struct SegmentSpec {
     Vec3 axis{};
     double radius = 0.0;
     double sweep_rad = 0.0;
+    Vec3 twist_start_normal{};
+    Vec3 twist_end_normal{};
+    double twist_angle_rad = 0.0; // Signed right-hand rotation around tangent.
+    double twist_length = 0.0; // Full straight segment, in voxel units.
+    TwistProfile twist_profile = TwistProfile::LINEAR;
 };
 
 struct Pose {
@@ -49,6 +55,9 @@ struct Request {
     double safe_margin = 0.0;
     double minimum_bend_radius = 0.0;
     double maximum_sample_spacing = 0.25; // Native voxel units.
+    double maximum_twist_step_rad = 0.17453292519943295; // Sampling only, 10 degrees.
+    double minimum_twist_length = 0.0; // Zero disables this process constraint.
+    double maximum_twist_rate_rad_per_voxel = 0.0; // Zero disables this constraint.
     std::string sample_id;
     std::string scene_id;
     std::string map_sha256;
